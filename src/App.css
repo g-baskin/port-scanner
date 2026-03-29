@@ -87,11 +87,26 @@
 
 .header h1 {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
   color: var(--text);
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0;
+  min-width: 0;
+}
+
+.header-title-main {
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.header-title-handle {
+  letter-spacing: 0.04em;
+  text-transform: none;
+  font-weight: 500;
+  color: var(--muted2);
 }
 
 .admin-badge {

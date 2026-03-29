@@ -222,7 +222,10 @@ function App() {
       <header className="header">
         <div className="header-title">
           <span className="header-dot" />
-          <h1>Port Scanner</h1>
+          <h1>
+            <span className="header-title-main">PORT SCANNER</span>
+            <span className="header-title-handle"> - @g-baskin</span>
+          </h1>
           {isAdmin && <span className="admin-badge">admin</span>}
         </div>
         <div className="header-actions">
