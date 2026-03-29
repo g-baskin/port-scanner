@@ -51,7 +51,7 @@ npm run tauri build
 
 Output (typical):
 
-- `src-tauri/target/release/bundle/macos/PORT SCANNER - @g-baskin.app` (name follows `productName` in `tauri.conf.json`)
+- `src-tauri/target/release/bundle/macos/PORT SCANNER - created by @g-baskin.app` (name follows `productName` in `tauri.conf.json`)
 
 Copy the `.app` to `/Applications` or the Desktop. If Gatekeeper complains, right-click → **Open** once.
 

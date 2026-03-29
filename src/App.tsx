@@ -224,7 +224,7 @@ function App() {
           <span className="header-dot" />
           <h1>
             <span className="header-title-main">PORT SCANNER</span>
-            <span className="header-title-handle"> - @g-baskin</span>
+            <span className="header-title-handle"> - created by @g-baskin</span>
           </h1>
           {isAdmin && <span className="admin-badge">admin</span>}
         </div>

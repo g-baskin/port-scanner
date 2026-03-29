@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "PORT SCANNER - @g-baskin",
+  "productName": "PORT SCANNER - created by @g-baskin",
   "version": "0.1.0",
   "identifier": "app.portscanner",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "PORT SCANNER - @g-baskin",
+        "title": "PORT SCANNER - created by @g-baskin",
         "width": 960,
         "height": 760,
         "resizable": true,
