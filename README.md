@@ -40,7 +40,7 @@ npm run tauri dev
 
 The UI loads from the Vite dev server (port **1420**); Tauri opens the native window.
 
-> **Cursor / CI tip:** If `tauri build` fails with an error about `--ci`, unset `CI` first:  
+> **CI tip:** Some environments set `CI=1`, which can break `tauri build`. If you see an invalid `--ci` error, run:  
 > `env -u CI npm run tauri build`
 
 ## Build (release `.app`)
