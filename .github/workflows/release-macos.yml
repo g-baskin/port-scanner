@@ -1,0 +1,52 @@
+# When you push a version tag (e.g. v0.1.0), build the macOS .app and attach it to a GitHub Release.
+# Does not commit binaries into the git tree — Releases are the right place for installable apps.
+
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri (release .app)
+        env:
+          CI: false
+        run: npm run tauri build
+
+      - name: Zip app bundle
+        run: |
+          cd "src-tauri/target/release/bundle/macos"
+          zip -ry "$GITHUB_WORKSPACE/PortScanner-macos.zip" "PORT SCANNER - created by @g-baskin.app"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PortScanner-macos.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -45,15 +45,46 @@ The UI loads from the Vite dev server (port **1420**); Tauri opens the native wi
 
 ## Build (release `.app`)
 
+This is a **real macOS application** (a `.app` bundle), not a script you run from Terminal for daily use. After building once, drag the app into **Applications** like any other program.
+
 ```bash
 npm run tauri build
 ```
 
-Output (typical):
+Output:
 
-- `src-tauri/target/release/bundle/macos/PORT SCANNER - created by @g-baskin.app` (name follows `productName` in `tauri.conf.json`)
+- `src-tauri/target/release/bundle/macos/PORT SCANNER - created by @g-baskin.app`  
+  (name follows `productName` in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json))
 
-Copy the `.app` to `/Applications` or the Desktop. If Gatekeeper complains, right-click → **Open** once.
+Bundle config uses **`"targets": ["app"]`** only (no `.dmg` here) so `tauri build` completes reliably without the optional DMG step that can fail in some environments.
+
+Copy the `.app` to **/Applications** or the Desktop. If Gatekeeper complains, right-click → **Open** once.
+
+### Why the built app is not committed to this git repo
+
+The `.app` is tens of megabytes and changes every build. Checking it into `main` would **bloat git history** and hit GitHub file-size friction. Instead:
+
+- **Developers:** build locally with `npm run tauri build`.
+- **Everyone else:** install from a **GitHub Release** (zip below) or download the **CI artifact** from [Actions](https://github.com/g-baskin/port-scanner/actions).
+
+### Install from a GitHub Release (recommended for sharing)
+
+When a maintainer pushes a **version tag** `v*` (e.g. `v0.1.0`), [.github/workflows/release-macos.yml](.github/workflows/release-macos.yml) builds the app and creates a **Release** with **`PortScanner-macos.zip`** attached.
+
+1. Open [Releases](https://github.com/g-baskin/port-scanner/releases).
+2. Download **`PortScanner-macos.zip`** from the latest release.
+3. Unzip → you get **`PORT SCANNER - created by @g-baskin.app`**.
+4. Drag that `.app` into **/Applications**.
+
+**Create a new release from your machine:**
+
+```bash
+git pull origin main
+git tag v0.1.0          # pick the next version
+git push origin v0.1.0  # triggers the Release workflow
+```
+
+Use a new tag for each release (e.g. `v0.1.1`, `v0.2.0`).
 
 ## Features
 
@@ -159,6 +190,10 @@ On every push to `main`, [.github/workflows/build-macos.yml](.github/workflows/b
 3. Uploads the built **`.app`** from `src-tauri/target/release/bundle/macos/` as a workflow **artifact** named `port-scanner-macos-app`.
 
 The artifact matches the **native architecture of the runner** (e.g. Apple Silicon on current `macos-latest`). It is **not** code-signed or notarized unless you add secrets and steps yourself.
+
+### GitHub Actions (CD — Releases)
+
+When you **push a tag** matching `v*` (e.g. `v0.1.0`), [.github/workflows/release-macos.yml](.github/workflows/release-macos.yml) runs: same build as above, then zips the `.app` as **`PortScanner-macos.zip`** and creates a **GitHub Release** with that file attached (`softprops/action-gh-release`). That is the supported way to publish a “real app” for download **without** storing binaries in the git tree.
 
 ### Distribution & code signing (macOS)
 
