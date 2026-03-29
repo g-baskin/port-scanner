@@ -61,8 +61,15 @@ Copy the `.app` to `/Applications` or the Desktop. If Gatekeeper complains, righ
 |--------|-------------|
 | **Dashboard** | Open ports count, unique PIDs, average / longest / newest uptime |
 | **Chart** | Relative uptime bars per listener (collapsible) |
+| **Sortable columns** | Click headers to sort (Excel-style), toggle ascending / descending |
+| **Filter** | Search box narrows rows by name, PID, port, bind, project, uptime |
+| **Protect** | 🛡 per row — blocked from Kill (stored in localStorage) |
+| **Kill confirm** | Modal before SIGKILL; optional **Skip** in ⚙ Settings |
+| **Copy** | ⧉ copies open URL + row fields (tab-separated) |
+| **Open in browser** | Respects **http/https** and optional **path** (⚙ Settings) |
+| **Auto-refresh** | Toolbar: off / 5s / 10s / 30s + **Pause** |
+| **Export** | **CSV** / **JSON** of the current (filtered) table |
 | **Bound to** | Human-readable bind, e.g. `localhost:3001` vs `0.0.0.0:3001` |
-| **Open in browser** | Button to open `http://localhost:{port}` |
 | **Kill** | `kill -9` with PID allowlist from the last scan |
 | **Scan as Admin** | Optional `osascript` elevation for a fuller `lsof` view |
 
@@ -71,6 +78,20 @@ Copy the `.app` to `/Applications` or the Desktop. If Gatekeeper complains, righ
 - Default scan: `lsof -n -P -iTCP -sTCP:LISTEN`
 - **Scan as Admin**: runs the same via AppleScript with administrator privileges (password prompt).
 - **Kill** only allows PIDs seen in the latest scan.
+
+### GitHub Actions
+
+On every push to `main`, [.github/workflows/build-macos.yml](.github/workflows/build-macos.yml) builds the release `.app` and uploads it as a workflow **artifact** (macOS runner architecture).
+
+### Distribution & code signing (macOS)
+
+Unsigned builds trigger Gatekeeper warnings. For sharing widely:
+
+1. Enroll in the **Apple Developer Program**.
+2. In Xcode, create a **Developer ID Application** certificate.
+3. Configure Tauri signing env vars (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) and enable notarization per [Tauri — macOS code signing](https://v2.tauri.app/distribute/sign/macos/).
+
+This repo does not embed signing secrets; add them in your local shell or CI secrets.
 
 ## Windows
 

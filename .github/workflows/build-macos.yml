@@ -1,0 +1,45 @@
+# Builds the Tauri .app on the latest macOS runner (native arch: Apple Silicon on current GitHub images).
+# For Intel-only or universal binaries, build locally or extend with extra targets.
+
+name: Build macOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri (release)
+        env:
+          CI: false
+        run: npm run tauri build
+
+      - name: Upload .app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: port-scanner-macos-app
+          path: src-tauri/target/release/bundle/macos/*.app
+          if-no-files-found: warn

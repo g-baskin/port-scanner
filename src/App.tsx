@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { type AppSettings, loadSettings, saveSettings } from "./prefs";
 import "./App.css";
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -16,12 +17,10 @@ interface PortProcess {
 
 type KillState = "killing" | "success" | "error";
 
-/** Public source repo (header attribution link). */
 const REPO_URL = "https://github.com/g-baskin/port-scanner";
-
 type SortKey = "process" | "pid" | "port" | "bind" | "open";
 
-// ── Uptime utilities ──────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────
 
 function parseUptimeSecs(uptime: string | undefined): number {
   if (!uptime || uptime === "—") return 0;
@@ -46,14 +45,12 @@ function secsToLabel(s: number): string {
   return `${m}m`;
 }
 
-/** Map 0–1 ratio to green → yellow → red hex color. */
 function ratioColor(ratio: number): string {
   if (ratio < 0.4) return "#00e87e";
   if (ratio < 0.7) return "#ffc043";
   return "#ff3d5a";
 }
 
-/** lsof address → human-readable bind string. */
 function formatBind(address: string): string {
   const i = address.lastIndexOf(":");
   if (i === -1) return address;
@@ -64,6 +61,66 @@ function formatBind(address: string): string {
   if (host === "127.0.0.1" || host === "::1" || host === "[::1]")
     return `localhost:${port}`;
   return address;
+}
+
+function rowKey(p: PortProcess): string {
+  return `${p.pid}-${p.port}-${p.address}`;
+}
+
+function buildOpenUrl(port: string, s: Pick<AppSettings, "openScheme" | "openPath">): string {
+  const path = (s.openPath || "").trim();
+  const normalized = path && !path.startsWith("/") ? `/${path}` : path;
+  const base = `${s.openScheme}://localhost:${port}`;
+  return normalized ? `${base}${normalized}` : base;
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function downloadBlob(filename: string, mime: string, body: string) {
+  const blob = new Blob([body], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function toCsv(rows: PortProcess[]): string {
+  const esc = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
+  const header = [
+    "name",
+    "pid",
+    "port",
+    "bound",
+    "address_raw",
+    "uptime",
+    "project",
+    "cwd",
+  ];
+  const lines = [header.join(",")];
+  for (const p of rows) {
+    lines.push(
+      [
+        esc(p.name),
+        p.pid,
+        esc(p.port),
+        esc(formatBind(p.address)),
+        esc(p.address),
+        esc(p.uptime ?? ""),
+        esc(p.project ?? ""),
+        esc(p.cwd ?? ""),
+      ].join(",")
+    );
+  }
+  return lines.join("\n");
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────
@@ -78,7 +135,12 @@ interface StatCardProps {
 
 function StatCard({ label, value, color, dim, icon }: StatCardProps) {
   return (
-    <div className="stat-card" style={{ "--card-color": color, "--card-dim": dim } as React.CSSProperties}>
+    <div
+      className="stat-card"
+      style={
+        { "--card-color": color, "--card-dim": dim } as React.CSSProperties
+      }
+    >
       <span className="stat-icon">{icon}</span>
       <span className="stat-value">{value}</span>
       <span className="stat-label">{label}</span>
@@ -86,11 +148,7 @@ function StatCard({ label, value, color, dim, icon }: StatCardProps) {
   );
 }
 
-interface ChartProps {
-  processes: PortProcess[];
-}
-
-function UptimeChart({ processes }: ChartProps) {
+function UptimeChart({ processes }: { processes: PortProcess[] }) {
   const [animated, setAnimated] = useState(false);
   const prevKey = useRef("");
 
@@ -105,7 +163,6 @@ function UptimeChart({ processes }: ChartProps) {
 
   const maxSecs = useMemo(() => Math.max(...rows.map((r) => r.secs), 1), [rows]);
 
-  // Re-trigger animation whenever the process list changes.
   useEffect(() => {
     const key = rows.map((r) => `${r.pid}:${r.secs}`).join(",");
     if (key !== prevKey.current) {
@@ -149,7 +206,7 @@ function UptimeChart({ processes }: ChartProps) {
   );
 }
 
-// ── Main app ──────────────────────────────────────────────────────────────
+// ── App ───────────────────────────────────────────────────────────────────
 
 function App() {
   const [processes, setProcesses] = useState<PortProcess[]>([]);
@@ -161,8 +218,28 @@ function App() {
   const [chartOpen, setChartOpen] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("port");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [filterText, setFilterText] = useState("");
+  const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pendingKill, setPendingKill] = useState<PortProcess | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [autoPaused, setAutoPaused] = useState(false);
 
-  const rowKey = (p: PortProcess) => `${p.pid}-${p.port}-${p.address}`;
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((msg: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 2200);
+  }, []);
+
+  const patchSettings = useCallback((patch: Partial<AppSettings>) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...patch };
+      saveSettings(next);
+      return next;
+    });
+  }, []);
 
   const toggleSort = useCallback((key: SortKey) => {
     setSortKey((prev) => {
@@ -205,38 +282,98 @@ function App() {
     return list;
   }, [processes, sortKey, sortDir]);
 
-  const scan = useCallback(async (admin = false) => {
-    setLoading(true);
-    setScanError(null);
-    setKillStates(new Map());
-    setKillErrors(new Map());
-    try {
-      const result = await invoke<PortProcess[]>(
-        admin ? "list_listeners_admin" : "list_listeners"
-      );
-      setProcesses(result);
-      setIsAdmin(admin);
-    } catch (e) {
-      setScanError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const q = filterText.trim().toLowerCase();
+  const filteredProcesses = useMemo(() => {
+    if (!q) return sortedProcesses;
+    return sortedProcesses.filter((p) => {
+      const hay = [
+        p.name,
+        String(p.pid),
+        p.port,
+        formatBind(p.address),
+        p.address,
+        p.project ?? "",
+        p.uptime ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [sortedProcesses, q]);
+
+  const scan = useCallback(
+    async (admin = false, opts?: { preserveRowState?: boolean }) => {
+      const preserve = opts?.preserveRowState ?? false;
+      if (!preserve) {
+        setKillStates(new Map());
+        setKillErrors(new Map());
+        setScanError(null);
+        setLoading(true);
+      }
+      try {
+        const result = await invoke<PortProcess[]>(
+          admin ? "list_listeners_admin" : "list_listeners"
+        );
+        setProcesses(result);
+        setIsAdmin(admin);
+        if (!preserve) setScanError(null);
+      } catch (e) {
+        if (!preserve) setScanError(String(e));
+      } finally {
+        if (!preserve) setLoading(false);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     scan(false);
   }, [scan]);
 
-  const kill = async (p: PortProcess) => {
+  useEffect(() => {
+    const sec = settings.autoRefreshSec;
+    if (sec <= 0 || autoPaused || loading) return;
+    const id = setInterval(() => {
+      scan(false, { preserveRowState: true });
+    }, sec * 1000);
+    return () => clearInterval(id);
+  }, [settings.autoRefreshSec, autoPaused, loading, scan]);
+
+  const isProtected = useCallback(
+    (p: PortProcess) => settings.protectedRowKeys.includes(rowKey(p)),
+    [settings.protectedRowKeys]
+  );
+
+  const toggleProtect = useCallback((p: PortProcess) => {
+    const k = rowKey(p);
+    setSettings((prev) => {
+      const set = new Set(prev.protectedRowKeys);
+      if (set.has(k)) set.delete(k);
+      else set.add(k);
+      const next = { ...prev, protectedRowKeys: [...set] };
+      saveSettings(next);
+      return next;
+    });
+  }, []);
+
+  const runKill = async (p: PortProcess) => {
     const key = rowKey(p);
     setKillStates((prev) => new Map(prev).set(key, "killing"));
-    setKillErrors((prev) => { const n = new Map(prev); n.delete(key); return n; });
+    setKillErrors((prev) => {
+      const n = new Map(prev);
+      n.delete(key);
+      return n;
+    });
     try {
       await invoke("kill_pid", { pid: p.pid });
       setKillStates((prev) => new Map(prev).set(key, "success"));
       setTimeout(() => {
         setProcesses((prev) => prev.filter((x) => rowKey(x) !== key));
-        setKillStates((prev) => { const n = new Map(prev); n.delete(key); return n; });
+        setKillStates((prev) => {
+          const n = new Map(prev);
+          n.delete(key);
+          return n;
+        });
       }, 700);
     } catch (e) {
       setKillStates((prev) => new Map(prev).set(key, "error"));
@@ -244,7 +381,10 @@ function App() {
     }
   };
 
-  // ── Stats ────────────────────────────────────────────────────────────────
+  const requestKill = (p: PortProcess) => {
+    if (settings.skipKillConfirm) void runKill(p);
+    else setPendingKill(p);
+  };
 
   const stats = useMemo(() => {
     const portCount = processes.length;
@@ -264,9 +404,146 @@ function App() {
     };
   }, [processes]);
 
+  const exportCsv = () => {
+    downloadBlob(
+      `port-scanner-${Date.now()}.csv`,
+      "text/csv;charset=utf-8",
+      toCsv(filteredProcesses)
+    );
+    showToast("Exported CSV");
+  };
+
+  const exportJson = () => {
+    downloadBlob(
+      `port-scanner-${Date.now()}.json`,
+      "application/json",
+      JSON.stringify(filteredProcesses, null, 2)
+    );
+    showToast("Exported JSON");
+  };
+
+  const copyRowLine = async (p: PortProcess) => {
+    const url = buildOpenUrl(p.port, settings);
+    const line = [url, p.name, p.pid, p.port, formatBind(p.address)]
+      .join("\t");
+    const ok = await copyText(line);
+    showToast(ok ? "Copied row" : "Copy failed");
+  };
+
   return (
     <div className="app">
-      {/* ── Header ─────────────────────────────────────────────────────── */}
+      {toast && <div className="toast">{toast}</div>}
+
+      {pendingKill && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => setPendingKill(null)}
+        >
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="kill-confirm-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="kill-confirm-title" className="modal-title">
+              Kill process?
+            </h2>
+            <p className="modal-body">
+              <strong>{pendingKill.name}</strong> (PID {pendingKill.pid}) on port{" "}
+              <strong>{pendingKill.port}</strong>
+              <br />
+              <span className="modal-sub">This sends SIGKILL — cannot be undone.</span>
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setPendingKill(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-kill"
+                onClick={() => {
+                  const t = pendingKill;
+                  setPendingKill(null);
+                  if (t) void runKill(t);
+                }}
+              >
+                Kill
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {settingsOpen && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => setSettingsOpen(false)}
+        >
+          <div
+            className="modal modal-wide"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="settings-title" className="modal-title">
+              Settings
+            </h2>
+            <div className="settings-grid">
+              <label className="settings-field">
+                <span>Open in browser</span>
+                <select
+                  value={settings.openScheme}
+                  onChange={(e) =>
+                    patchSettings({
+                      openScheme: e.target.value as "http" | "https",
+                    })
+                  }
+                >
+                  <option value="http">http://</option>
+                  <option value="https">https://</option>
+                </select>
+              </label>
+              <label className="settings-field settings-field-span">
+                <span>URL path after port (optional)</span>
+                <input
+                  type="text"
+                  value={settings.openPath}
+                  onChange={(e) => patchSettings({ openPath: e.target.value })}
+                  placeholder="/ or /dashboard"
+                />
+              </label>
+              <label className="settings-field settings-field-check">
+                <input
+                  type="checkbox"
+                  checked={settings.skipKillConfirm}
+                  onChange={(e) =>
+                    patchSettings({ skipKillConfirm: e.target.checked })
+                  }
+                />
+                <span>Skip kill confirmation dialog</span>
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setSettingsOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <header className="header">
         <div className="header-title">
           <span className="header-dot" />
@@ -288,6 +565,15 @@ function App() {
         </div>
         <div className="header-actions">
           <button
+            type="button"
+            className="btn btn-ghost"
+            title="Preferences"
+            onClick={() => setSettingsOpen(true)}
+          >
+            ⚙
+          </button>
+          <button
+            type="button"
             className="btn btn-ghost"
             onClick={() => scan(false)}
             disabled={loading}
@@ -296,6 +582,7 @@ function App() {
             {loading ? <span className="spinner" /> : "↻ Refresh"}
           </button>
           <button
+            type="button"
             className="btn btn-ghost btn-admin"
             onClick={() => scan(true)}
             disabled={loading}
@@ -306,7 +593,6 @@ function App() {
         </div>
       </header>
 
-      {/* ── Stats bar ──────────────────────────────────────────────────── */}
       <div className="stats-bar">
         <StatCard
           icon="◉"
@@ -349,7 +635,6 @@ function App() {
         />
       </div>
 
-      {/* ── Content ────────────────────────────────────────────────────── */}
       <div className="content">
         {scanError && (
           <div className="banner banner-error">
@@ -369,9 +654,63 @@ function App() {
           </div>
         ) : (
           <>
-            {/* ── Chart ────────────────────────────────────────────────── */}
+            <div className="toolbar">
+              <input
+                type="search"
+                className="toolbar-filter"
+                placeholder="Filter by name, PID, port, bind…"
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                aria-label="Filter listeners"
+              />
+              <div className="toolbar-group">
+                <label className="toolbar-label">
+                  Auto
+                  <select
+                    value={settings.autoRefreshSec}
+                    onChange={(e) =>
+                      patchSettings({
+                        autoRefreshSec: Number(e.target.value),
+                      })
+                    }
+                  >
+                    <option value={0}>Off</option>
+                    <option value={5}>5s</option>
+                    <option value={10}>10s</option>
+                    <option value={30}>30s</option>
+                  </select>
+                </label>
+                <label className="toolbar-label toolbar-check">
+                  <input
+                    type="checkbox"
+                    checked={autoPaused}
+                    onChange={(e) => setAutoPaused(e.target.checked)}
+                    disabled={settings.autoRefreshSec <= 0}
+                  />
+                  Pause
+                </label>
+              </div>
+              <div className="toolbar-group toolbar-export">
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-tiny"
+                  onClick={exportCsv}
+                >
+                  CSV
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-tiny"
+                  onClick={exportJson}
+                >
+                  JSON
+                </button>
+              </div>
+            </div>
+
             <div className="chart-section">
               <button
+                type="button"
                 className="chart-toggle"
                 onClick={() => setChartOpen((v) => !v)}
               >
@@ -381,11 +720,13 @@ function App() {
               {chartOpen && <UptimeChart processes={processes} />}
             </div>
 
-            {/* ── Table ────────────────────────────────────────────────── */}
             <div className="table-wrap">
               <table className="process-table">
                 <thead>
                   <tr>
+                    <th className="th-prot" title="Protect from kill">
+                      <span className="th-prot-label">🛡</span>
+                    </th>
                     <th className="col-sort">
                       <button
                         type="button"
@@ -394,9 +735,13 @@ function App() {
                       >
                         Process
                         {sortKey === "process" ? (
-                          <span className="th-sort-arrow">{sortDir === "asc" ? "▲" : "▼"}</span>
+                          <span className="th-sort-arrow">
+                            {sortDir === "asc" ? "▲" : "▼"}
+                          </span>
                         ) : (
-                          <span className="th-sort-dim" aria-hidden>⇅</span>
+                          <span className="th-sort-dim" aria-hidden>
+                            ⇅
+                          </span>
                         )}
                       </button>
                     </th>
@@ -408,9 +753,13 @@ function App() {
                       >
                         PID
                         {sortKey === "pid" ? (
-                          <span className="th-sort-arrow">{sortDir === "asc" ? "▲" : "▼"}</span>
+                          <span className="th-sort-arrow">
+                            {sortDir === "asc" ? "▲" : "▼"}
+                          </span>
                         ) : (
-                          <span className="th-sort-dim" aria-hidden>⇅</span>
+                          <span className="th-sort-dim" aria-hidden>
+                            ⇅
+                          </span>
                         )}
                       </button>
                     </th>
@@ -422,9 +771,13 @@ function App() {
                       >
                         Port
                         {sortKey === "port" ? (
-                          <span className="th-sort-arrow">{sortDir === "asc" ? "▲" : "▼"}</span>
+                          <span className="th-sort-arrow">
+                            {sortDir === "asc" ? "▲" : "▼"}
+                          </span>
                         ) : (
-                          <span className="th-sort-dim" aria-hidden>⇅</span>
+                          <span className="th-sort-dim" aria-hidden>
+                            ⇅
+                          </span>
                         )}
                       </button>
                     </th>
@@ -436,9 +789,13 @@ function App() {
                       >
                         Bound to
                         {sortKey === "bind" ? (
-                          <span className="th-sort-arrow">{sortDir === "asc" ? "▲" : "▼"}</span>
+                          <span className="th-sort-arrow">
+                            {sortDir === "asc" ? "▲" : "▼"}
+                          </span>
                         ) : (
-                          <span className="th-sort-dim" aria-hidden>⇅</span>
+                          <span className="th-sort-dim" aria-hidden>
+                            ⇅
+                          </span>
                         )}
                       </button>
                     </th>
@@ -450,9 +807,13 @@ function App() {
                       >
                         Open
                         {sortKey === "open" ? (
-                          <span className="th-sort-arrow">{sortDir === "asc" ? "▲" : "▼"}</span>
+                          <span className="th-sort-arrow">
+                            {sortDir === "asc" ? "▲" : "▼"}
+                          </span>
                         ) : (
-                          <span className="th-sort-dim" aria-hidden>⇅</span>
+                          <span className="th-sort-dim" aria-hidden>
+                            ⇅
+                          </span>
                         )}
                       </button>
                     </th>
@@ -460,59 +821,114 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedProcesses.map((p) => {
-                    const key = rowKey(p);
-                    const ks = killStates.get(key);
-                    const errMsg = killErrors.get(key);
-                    return (
-                      <tr
-                        key={key}
-                        className={
-                          ks === "success"
-                            ? "row row-success"
-                            : ks === "error"
-                            ? "row row-error"
-                            : "row"
-                        }
-                      >
-                        <td className="col-name">
-                          <span className="col-name-text">{p.name}</span>
-                          {p.project && (
-                            <span className="col-name-project" title={p.cwd}>
-                              {p.project}
-                            </span>
-                          )}
-                        </td>
-                        <td className="col-pid">{p.pid}</td>
-                        <td className="col-port">{p.port}</td>
-                        <td className="col-bind" title={p.address}>
-                          {formatBind(p.address)}
-                        </td>
-                        <td className="col-open">{p.uptime ?? "—"}</td>
-                        <td className="col-action">
-                          {errMsg && (
-                            <span className="kill-error-tip" title={errMsg}>⚠</span>
-                          )}
-                          <button
-                            className="btn btn-open"
-                            title={`Open http://localhost:${p.port}`}
-                            onClick={() =>
-                              invoke("open_url", { url: `http://localhost:${p.port}` })
-                            }
-                          >
-                            ↗
-                          </button>
-                          <button
-                            className={`btn btn-kill${ks === "success" ? " btn-kill-done" : ks === "error" ? " btn-kill-failed" : ""}`}
-                            onClick={() => kill(p)}
-                            disabled={ks === "killing" || ks === "success"}
-                          >
-                            {ks === "killing" ? "…" : ks === "success" ? "✓" : ks === "error" ? "Retry" : "Kill"}
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {filteredProcesses.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="td-empty-filter">
+                        No rows match your filter.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredProcesses.map((p) => {
+                      const key = rowKey(p);
+                      const ks = killStates.get(key);
+                      const errMsg = killErrors.get(key);
+                      const prot = isProtected(p);
+                      const openUrl = buildOpenUrl(p.port, settings);
+                      return (
+                        <tr
+                          key={key}
+                          className={
+                            prot
+                              ? "row row-protected"
+                              : ks === "success"
+                                ? "row row-success"
+                                : ks === "error"
+                                  ? "row row-error"
+                                  : "row"
+                          }
+                        >
+                          <td className="col-prot">
+                            <button
+                              type="button"
+                              className={`btn-prot${prot ? " btn-prot-on" : ""}`}
+                              title={
+                                prot
+                                  ? "Unprotect — allow Kill"
+                                  : "Protect — block Kill"
+                              }
+                              onClick={() => toggleProtect(p)}
+                            >
+                              {prot ? "🛡" : "○"}
+                            </button>
+                          </td>
+                          <td className="col-name">
+                            <span className="col-name-text">{p.name}</span>
+                            {p.project && (
+                              <span className="col-name-project" title={p.cwd}>
+                                {p.project}
+                              </span>
+                            )}
+                          </td>
+                          <td className="col-pid">{p.pid}</td>
+                          <td className="col-port">{p.port}</td>
+                          <td className="col-bind" title={p.address}>
+                            {formatBind(p.address)}
+                          </td>
+                          <td className="col-open">{p.uptime ?? "—"}</td>
+                          <td className="col-action">
+                            {errMsg && (
+                              <span className="kill-error-tip" title={errMsg}>
+                                ⚠
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              className="btn btn-copy"
+                              title="Copy URL + row (tab-separated)"
+                              onClick={() => void copyRowLine(p)}
+                            >
+                              ⧉
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-open"
+                              title={`Open ${openUrl}`}
+                              onClick={() =>
+                                invoke("open_url", { url: openUrl })
+                              }
+                            >
+                              ↗
+                            </button>
+                            <button
+                              type="button"
+                              className={`btn btn-kill${ks === "success" ? " btn-kill-done" : ks === "error" ? " btn-kill-failed" : ""}`}
+                              onClick={() => requestKill(p)}
+                              disabled={
+                                ks === "killing" ||
+                                ks === "success" ||
+                                prot
+                              }
+                              title={
+                                prot
+                                  ? "Protected — click 🛡 to allow kill"
+                                  : undefined
+                              }
+                            >
+                              {ks === "killing"
+                                ? "…"
+                                : ks === "success"
+                                  ? "✓"
+                                  : ks === "error"
+                                    ? "Retry"
+                                    : prot
+                                      ? "—"
+                                      : "Kill"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
             </div>
@@ -520,12 +936,16 @@ function App() {
         )}
       </div>
 
-      {/* ── Footer ─────────────────────────────────────────────────────── */}
       <footer className="footer">
         {!loading && (
           <span>
-            {processes.length} {processes.length === 1 ? "listener" : "listeners"}
+            {q
+              ? `Showing ${filteredProcesses.length} of ${processes.length} listeners`
+              : `${processes.length} ${processes.length === 1 ? "listener" : "listeners"}`}
             {isAdmin ? " · admin scan" : ""}
+            {settings.autoRefreshSec > 0 && !autoPaused
+              ? ` · auto ${settings.autoRefreshSec}s`
+              : ""}
           </span>
         )}
       </footer>
