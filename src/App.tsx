@@ -16,6 +16,11 @@ interface PortProcess {
 
 type KillState = "killing" | "success" | "error";
 
+/** Public source repo (header attribution link). */
+const REPO_URL = "https://github.com/g-baskin/port-scanner";
+
+type SortKey = "process" | "pid" | "port" | "bind" | "open";
+
 // ── Uptime utilities ──────────────────────────────────────────────────────
 
 function parseUptimeSecs(uptime: string | undefined): number {
@@ -154,8 +159,51 @@ function App() {
   const [killErrors, setKillErrors] = useState<Map<string, string>>(new Map());
   const [isAdmin, setIsAdmin] = useState(false);
   const [chartOpen, setChartOpen] = useState(true);
+  const [sortKey, setSortKey] = useState<SortKey>("port");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const rowKey = (p: PortProcess) => `${p.pid}-${p.port}-${p.address}`;
+
+  const toggleSort = useCallback((key: SortKey) => {
+    setSortKey((prev) => {
+      if (prev === key) {
+        setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+        return prev;
+      }
+      setSortDir("asc");
+      return key;
+    });
+  }, []);
+
+  const sortedProcesses = useMemo(() => {
+    const list = [...processes];
+    const mul = sortDir === "asc" ? 1 : -1;
+    list.sort((a, b) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case "process":
+          cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+          break;
+        case "pid":
+          cmp = a.pid - b.pid;
+          break;
+        case "port":
+          cmp = (parseInt(a.port, 10) || 0) - (parseInt(b.port, 10) || 0);
+          break;
+        case "bind":
+          cmp = formatBind(a.address).localeCompare(formatBind(b.address));
+          break;
+        case "open":
+          cmp = parseUptimeSecs(a.uptime) - parseUptimeSecs(b.uptime);
+          break;
+        default:
+          break;
+      }
+      if (cmp !== 0) return cmp * mul;
+      return a.pid - b.pid || a.port.localeCompare(b.port);
+    });
+    return list;
+  }, [processes, sortKey, sortDir]);
 
   const scan = useCallback(async (admin = false) => {
     setLoading(true);
@@ -224,7 +272,17 @@ function App() {
           <span className="header-dot" />
           <h1>
             <span className="header-title-main">PORT SCANNER</span>
-            <span className="header-title-handle"> - created by @g-baskin</span>
+            <span className="header-title-handle">
+              {" - created by "}
+              <button
+                type="button"
+                className="header-repo-link"
+                onClick={() => invoke("open_url", { url: REPO_URL })}
+                title={`Open ${REPO_URL}`}
+              >
+                @g-baskin
+              </button>
+            </span>
           </h1>
           {isAdmin && <span className="admin-badge">admin</span>}
         </div>
@@ -328,16 +386,81 @@ function App() {
               <table className="process-table">
                 <thead>
                   <tr>
-                    <th>Process</th>
-                    <th>PID</th>
-                    <th>Port</th>
-                    <th>Bound to</th>
-                    <th>Open</th>
-                    <th></th>
+                    <th className="col-sort">
+                      <button
+                        type="button"
+                        className={`th-sort${sortKey === "process" ? " th-sort-active" : ""}`}
+                        onClick={() => toggleSort("process")}
+                      >
+                        Process
+                        {sortKey === "process" ? (
+                          <span className="th-sort-arrow">{sortDir === "asc" ? "▲" : "▼"}</span>
+                        ) : (
+                          <span className="th-sort-dim" aria-hidden>⇅</span>
+                        )}
+                      </button>
+                    </th>
+                    <th className="col-sort">
+                      <button
+                        type="button"
+                        className={`th-sort${sortKey === "pid" ? " th-sort-active" : ""}`}
+                        onClick={() => toggleSort("pid")}
+                      >
+                        PID
+                        {sortKey === "pid" ? (
+                          <span className="th-sort-arrow">{sortDir === "asc" ? "▲" : "▼"}</span>
+                        ) : (
+                          <span className="th-sort-dim" aria-hidden>⇅</span>
+                        )}
+                      </button>
+                    </th>
+                    <th className="col-sort">
+                      <button
+                        type="button"
+                        className={`th-sort${sortKey === "port" ? " th-sort-active" : ""}`}
+                        onClick={() => toggleSort("port")}
+                      >
+                        Port
+                        {sortKey === "port" ? (
+                          <span className="th-sort-arrow">{sortDir === "asc" ? "▲" : "▼"}</span>
+                        ) : (
+                          <span className="th-sort-dim" aria-hidden>⇅</span>
+                        )}
+                      </button>
+                    </th>
+                    <th className="col-sort">
+                      <button
+                        type="button"
+                        className={`th-sort${sortKey === "bind" ? " th-sort-active" : ""}`}
+                        onClick={() => toggleSort("bind")}
+                      >
+                        Bound to
+                        {sortKey === "bind" ? (
+                          <span className="th-sort-arrow">{sortDir === "asc" ? "▲" : "▼"}</span>
+                        ) : (
+                          <span className="th-sort-dim" aria-hidden>⇅</span>
+                        )}
+                      </button>
+                    </th>
+                    <th className="col-sort">
+                      <button
+                        type="button"
+                        className={`th-sort${sortKey === "open" ? " th-sort-active" : ""}`}
+                        onClick={() => toggleSort("open")}
+                      >
+                        Open
+                        {sortKey === "open" ? (
+                          <span className="th-sort-arrow">{sortDir === "asc" ? "▲" : "▼"}</span>
+                        ) : (
+                          <span className="th-sort-dim" aria-hidden>⇅</span>
+                        )}
+                      </button>
+                    </th>
+                    <th className="th-actions" aria-label="Actions" />
                   </tr>
                 </thead>
                 <tbody>
-                  {processes.map((p) => {
+                  {sortedProcesses.map((p) => {
                     const key = rowKey(p);
                     const ks = killStates.get(key);
                     const errMsg = killErrors.get(key);

@@ -109,6 +109,26 @@
   color: var(--muted2);
 }
 
+.header-repo-link {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: var(--blue);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: rgba(61, 148, 255, 0.35);
+  text-underline-offset: 2px;
+}
+
+.header-repo-link:hover {
+  color: #6eb0ff;
+  text-decoration-color: var(--blue);
+}
+
 .admin-badge {
   font-size: 9px;
   font-weight: 700;
@@ -434,7 +454,7 @@
 }
 
 .process-table th {
-  padding: 7px 14px;
+  padding: 0;
   text-align: left;
   font-family: var(--font-mono);
   font-size: 9px;
@@ -443,8 +463,63 @@
   letter-spacing: 0.14em;
   color: var(--muted);
   border-bottom: 1px solid var(--border);
+  vertical-align: middle;
 }
-.process-table th:last-child { text-align: right; }
+
+.process-table th.th-actions {
+  padding: 7px 14px;
+  text-align: right;
+}
+
+.col-sort {
+  padding: 0;
+}
+
+.th-sort {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 7px 14px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.12s, background 0.12s;
+  border-radius: 3px;
+}
+
+.th-sort:hover {
+  color: var(--text);
+  background: rgba(61, 148, 255, 0.06);
+}
+
+.th-sort-active {
+  color: var(--blue);
+}
+
+.th-sort-arrow {
+  font-size: 8px;
+  opacity: 0.95;
+  letter-spacing: 0;
+}
+
+.th-sort-dim {
+  font-size: 7px;
+  opacity: 0.25;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+.process-table th:last-child:not(.col-sort) { text-align: right; }
 
 .process-table td {
   padding: 9px 14px;
