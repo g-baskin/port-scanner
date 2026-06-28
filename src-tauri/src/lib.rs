@@ -640,3 +640,68 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_lsof_extracts_and_sorts_unique_listeners() {
+        let output = r#"COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+node     2222 gabe   23u  IPv4 0xabc      0t0  TCP *:5173 (LISTEN)
+Python   1111 gabe   10u  IPv4 0xdef      0t0  TCP 127.0.0.1:8000 (LISTEN)
+node     2222 gabe   23u  IPv4 0xabc      0t0  TCP *:5173 (LISTEN)
+badpid   nope gabe   23u  IPv4 0xabc      0t0  TCP *:9999 (LISTEN)
+"#;
+
+        let rows = parse_lsof(output);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].pid, 2222);
+        assert_eq!(rows[0].name, "node");
+        assert_eq!(rows[0].port, "5173");
+        assert_eq!(rows[0].address, "*:5173");
+        assert_eq!(rows[1].pid, 1111);
+        assert_eq!(rows[1].port, "8000");
+    }
+
+    #[test]
+    fn parse_cwds_maps_pid_to_non_root_working_directory() {
+        let output = "p10\nfcwd\nn/Users/gabe/project\np11\nfcwd\nn/\np12\nfcwd\nn/tmp/demo\n";
+
+        let cwds = parse_cwds(output);
+
+        assert_eq!(cwds.get(&10), Some(&"/Users/gabe/project".to_string()));
+        assert_eq!(cwds.get(&12), Some(&"/tmp/demo".to_string()));
+        assert!(!cwds.contains_key(&11));
+    }
+
+    #[test]
+    fn format_etime_returns_compact_human_labels() {
+        assert_eq!(format_etime("00:00:12"), "< 1m");
+        assert_eq!(format_etime("03:04"), "3m");
+        assert_eq!(format_etime("02:00:00"), "2h");
+        assert_eq!(format_etime("02:34:00"), "2h 34m");
+        assert_eq!(format_etime("3-00:00:01"), "3d");
+        assert_eq!(format_etime("3-04:00:01"), "3d 4h");
+    }
+
+    #[test]
+    fn parse_processes_preserves_command_and_derives_name() {
+        let output = " 123 01:02:03 /usr/local/bin/node server.js\n 456 03:04 /Applications/Example App.app/Contents/MacOS/app --flag\n nope 03:04 bad\n";
+
+        let rows = parse_processes(output);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].pid, 456);
+        assert_eq!(rows[0].name, "Example");
+        assert_eq!(
+            rows[0].command,
+            "/Applications/Example App.app/Contents/MacOS/app --flag"
+        );
+        assert_eq!(rows[0].uptime.as_deref(), Some("3m"));
+        assert_eq!(rows[1].pid, 123);
+        assert_eq!(rows[1].name, "node");
+        assert_eq!(rows[1].uptime.as_deref(), Some("1h 2m"));
+    }
+}

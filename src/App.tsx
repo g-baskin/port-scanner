@@ -204,6 +204,44 @@ function processesToCsv(rows: RunningProcess[]): string {
   return lines.join("\n");
 }
 
+function systemToCsv(metrics: SystemMetrics | null, rows: RunningProcess[]): string {
+  const esc = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
+  const lines = ["section,key,value,name,pid,command,uptime,project,cwd,listeners"];
+  const pushMetric = (key: string, value: string | number) => {
+    lines.push(["metrics", key, value, "", "", "", "", "", "", ""].map(esc).join(","));
+  };
+
+  if (metrics) {
+    pushMetric("memory_total_bytes", metrics.memory.total_bytes);
+    pushMetric("memory_used_bytes", metrics.memory.used_bytes);
+    pushMetric("memory_available_bytes", metrics.memory.available_bytes);
+    pushMetric("disk_mount", metrics.disk.mount);
+    pushMetric("disk_total_bytes", metrics.disk.total_bytes);
+    pushMetric("disk_used_bytes", metrics.disk.used_bytes);
+    pushMetric("disk_available_bytes", metrics.disk.available_bytes);
+    pushMetric("process_count", metrics.process_count);
+    pushMetric("listening_process_count", metrics.listening_process_count);
+  }
+
+  for (const p of rows) {
+    lines.push(
+      [
+        esc("process"),
+        esc(""),
+        esc(""),
+        esc(p.name),
+        esc(p.pid),
+        esc(p.command),
+        esc(p.uptime ?? ""),
+        esc(p.project ?? ""),
+        esc(p.cwd ?? ""),
+        esc(p.listener_addresses.map(formatBind).join(" ")),
+      ].join(",")
+    );
+  }
+  return lines.join("\n");
+}
+
 // ── Sub-components ────────────────────────────────────────────────────────
 
 interface StatCardProps {
@@ -508,7 +546,7 @@ function App() {
         const metrics = await invoke<SystemMetrics>("get_system_metrics");
         setSystemMetrics((prev) => ({
           ...metrics,
-          process_count: prev?.process_count ?? runningProcesses.length,
+          process_count: prev?.process_count ?? 0,
           listening_process_count: prev?.listening_process_count ?? 0,
         }));
       } catch (e) {
@@ -540,7 +578,7 @@ function App() {
         }
       }
     },
-    [runningProcesses.length]
+    []
   );
 
   useEffect(() => {
@@ -632,12 +670,12 @@ function App() {
       };
     }
 
-    const source = viewMode === "listeners" ? processes : runningProcesses;
-    const portCount = viewMode === "listeners" ? processes.length : runningProcesses.length;
+    const source = viewMode === "listeners" ? filteredProcesses : filteredRunningProcesses;
+    const portCount = source.length;
     const pidCount =
       viewMode === "listeners"
-        ? new Set(processes.map((p) => p.pid)).size
-        : runningProcesses.filter((p) => p.listener_addresses.length > 0).length;
+        ? new Set(filteredProcesses.map((p) => p.pid)).size
+        : filteredRunningProcesses.filter((p) => p.listener_addresses.length > 0).length;
     const secs = source.map((p) => parseUptimeSecs(p.uptime)).filter((s) => s > 0);
     if (secs.length === 0)
       return { portCount, pidCount, avg: "—", longest: "—", newest: "—" };
@@ -649,7 +687,7 @@ function App() {
       longest: secsToLabel(Math.max(...secs)),
       newest: secsToLabel(Math.min(...secs)),
     };
-  }, [processes, runningProcesses, systemMetrics, viewMode]);
+  }, [filteredProcesses, filteredRunningProcesses, runningProcesses.length, systemMetrics, viewMode]);
 
   const exportCsv = () => {
     downloadBlob(
@@ -657,7 +695,9 @@ function App() {
       "text/csv;charset=utf-8",
       viewMode === "listeners"
         ? toCsv(filteredProcesses)
-        : processesToCsv(filteredRunningProcesses)
+        : viewMode === "processes"
+          ? processesToCsv(filteredRunningProcesses)
+          : systemToCsv(systemMetrics, filteredRunningProcesses)
     );
     showToast("Exported CSV");
   };
@@ -842,7 +882,7 @@ function App() {
               <button
                 type="button"
                 className="header-repo-link"
-                onClick={() => invoke("open_url", { url: REPO_URL })}
+                onClick={() => void invoke("open_url", { url: REPO_URL })}
                 title={`Open ${REPO_URL}`}
               >
                 @g-baskin
@@ -872,7 +912,7 @@ function App() {
           <button
             type="button"
             className="btn btn-ghost btn-admin"
-            onClick={() => scan(true)}
+            onClick={() => void scan(true)}
             disabled={loading || viewMode !== "listeners"}
             title={viewMode !== "listeners" ? "Admin scan applies to ports" : "Prompts for admin password"}
           >
@@ -930,6 +970,83 @@ function App() {
           </div>
         )}
 
+        <div className="toolbar">
+          <div className="view-toggle" aria-label="View mode">
+            <button
+              type="button"
+              className={`view-toggle-btn${viewMode === "listeners" ? " view-toggle-active" : ""}`}
+              onClick={() => setViewMode("listeners")}
+            >
+              Ports
+            </button>
+            <button
+              type="button"
+              className={`view-toggle-btn${viewMode === "processes" ? " view-toggle-active" : ""}`}
+              onClick={() => setViewMode("processes")}
+            >
+              Processes
+            </button>
+            <button
+              type="button"
+              className={`view-toggle-btn${viewMode === "system" ? " view-toggle-active" : ""}`}
+              onClick={() => setViewMode("system")}
+            >
+              System
+            </button>
+          </div>
+          <input
+            type="search"
+            className="toolbar-filter"
+            placeholder={viewMode === "listeners" ? "Filter by name, PID, port, bind…" : "Filter by app, PID, command, folder…"}
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            aria-label={viewMode === "listeners" ? "Filter listeners" : "Filter processes"}
+          />
+          <div className="toolbar-group">
+            <label className="toolbar-label">
+              Auto
+              <select
+                value={settings.autoRefreshSec}
+                onChange={(e) =>
+                  patchSettings({
+                    autoRefreshSec: Number(e.target.value),
+                  })
+                }
+              >
+                <option value={0}>Off</option>
+                <option value={5}>5s</option>
+                <option value={10}>10s</option>
+                <option value={30}>30s</option>
+              </select>
+            </label>
+            <label className="toolbar-label toolbar-check">
+              <input
+                type="checkbox"
+                checked={autoPaused}
+                onChange={(e) => setAutoPaused(e.target.checked)}
+                disabled={settings.autoRefreshSec <= 0}
+              />
+              Pause
+            </label>
+          </div>
+          <div className="toolbar-group toolbar-export">
+            <button
+              type="button"
+              className="btn btn-ghost btn-tiny"
+              onClick={exportCsv}
+            >
+              CSV
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-tiny"
+              onClick={exportJson}
+            >
+              JSON
+            </button>
+          </div>
+        </div>
+
         {loading && !hasRows ? (
           <div className="empty-state">
             <p className="empty-icon">◌</p>
@@ -960,83 +1077,6 @@ function App() {
           </div>
         ) : (
           <>
-            <div className="toolbar">
-              <div className="view-toggle" aria-label="View mode">
-                <button
-                  type="button"
-                  className={`view-toggle-btn${viewMode === "listeners" ? " view-toggle-active" : ""}`}
-                  onClick={() => setViewMode("listeners")}
-                >
-                  Ports
-                </button>
-                <button
-                  type="button"
-                  className={`view-toggle-btn${viewMode === "processes" ? " view-toggle-active" : ""}`}
-                  onClick={() => setViewMode("processes")}
-                >
-                  Processes
-                </button>
-                <button
-                  type="button"
-                  className={`view-toggle-btn${viewMode === "system" ? " view-toggle-active" : ""}`}
-                  onClick={() => setViewMode("system")}
-                >
-                  System
-                </button>
-              </div>
-              <input
-                type="search"
-                className="toolbar-filter"
-                placeholder={viewMode === "listeners" ? "Filter by name, PID, port, bind…" : "Filter by app, PID, command, folder…"}
-                value={filterText}
-                onChange={(e) => setFilterText(e.target.value)}
-                aria-label={viewMode === "listeners" ? "Filter listeners" : "Filter processes"}
-              />
-              <div className="toolbar-group">
-                <label className="toolbar-label">
-                  Auto
-                  <select
-                    value={settings.autoRefreshSec}
-                    onChange={(e) =>
-                      patchSettings({
-                        autoRefreshSec: Number(e.target.value),
-                      })
-                    }
-                  >
-                    <option value={0}>Off</option>
-                    <option value={5}>5s</option>
-                    <option value={10}>10s</option>
-                    <option value={30}>30s</option>
-                  </select>
-                </label>
-                <label className="toolbar-label toolbar-check">
-                  <input
-                    type="checkbox"
-                    checked={autoPaused}
-                    onChange={(e) => setAutoPaused(e.target.checked)}
-                    disabled={settings.autoRefreshSec <= 0}
-                  />
-                  Pause
-                </label>
-              </div>
-              <div className="toolbar-group toolbar-export">
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-tiny"
-                  onClick={exportCsv}
-                >
-                  CSV
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-tiny"
-                  onClick={exportJson}
-                >
-                  JSON
-                </button>
-              </div>
-            </div>
-
             {viewMode === "listeners" && (
               <div className="chart-section">
                 <button
@@ -1233,7 +1273,7 @@ function App() {
                               className="btn btn-open"
                               title={`Open ${openUrl}`}
                               onClick={() =>
-                                invoke("open_url", { url: openUrl })
+                                void invoke("open_url", { url: openUrl })
                               }
                             >
                               ↗
@@ -1372,9 +1412,15 @@ function App() {
                 ? q
                   ? `Showing ${filteredProcesses.length} of ${processes.length} listeners`
                   : `${processes.length} ${processes.length === 1 ? "listener" : "listeners"}`
-                : q
-                  ? `Showing ${filteredRunningProcesses.length} of ${runningProcesses.length} processes`
-                  : `${runningProcesses.length} ${runningProcesses.length === 1 ? "process" : "processes"}`}
+                : viewMode === "processes"
+                  ? q
+                    ? `Showing ${filteredRunningProcesses.length} of ${runningProcesses.length} processes`
+                    : `${runningProcesses.length} ${runningProcesses.length === 1 ? "process" : "processes"}`
+                  : q
+                    ? `Showing ${filteredRunningProcesses.length} of ${runningProcesses.length} system processes`
+                    : systemMetrics
+                      ? `${formatBytes(systemMetrics.memory.available_bytes)} memory free · ${formatBytes(systemMetrics.disk.available_bytes)} disk free`
+                      : "System metrics not loaded"}
               {isAdmin && viewMode === "listeners" ? " · admin scan" : ""}
               {settings.autoRefreshSec > 0 && !autoPaused
                 ? ` · auto ${settings.autoRefreshSec}s`

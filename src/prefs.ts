@@ -48,5 +48,9 @@ export function loadSettings(): AppSettings {
 
 export function saveSettings(s: AppSettings) {
   if (typeof window === "undefined") return;
-  localStorage.setItem(KEY, JSON.stringify(s));
+  try {
+    localStorage.setItem(KEY, JSON.stringify(s));
+  } catch {
+    // Persistence is best-effort; the in-memory setting update still applies.
+  }
 }

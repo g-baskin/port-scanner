@@ -1,6 +1,6 @@
 # Port Scanner
 
-A lightweight **macOS** desktop app to scan TCP listeners, see bind addresses and uptime, open `http://localhost:{port}` in your browser, and kill processes when you need a clean slate. Built with **Tauri 2**, **Vite**, **React**, and **TypeScript**.
+A lightweight **macOS** desktop app to scan TCP listeners, inspect running processes, view system memory/disk metrics, open `http://localhost:{port}` in your browser, and kill processes when you need a clean slate. Built with **Tauri 2**, **Vite**, **React**, and **TypeScript**.
 
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 
@@ -27,7 +27,7 @@ For day-to-day use, a single-architecture build on your machine is enough.
 ## Requirements
 
 - [Rust](https://rustup.rs/) (stable)
-- **Node.js 18+** and **npm**
+- **Node.js 22+** and **npm**
 
 ## Development
 
@@ -90,16 +90,19 @@ Use a new tag for each release (e.g. `v0.1.1`, `v0.2.0`).
 
 | Feature | Description |
 |--------|-------------|
-| **Dashboard** | Open ports count, unique PIDs, average / longest / newest uptime |
+| **Ports view** | TCP listeners with process, PID, port, bind address, uptime, project folder, copy/open/kill actions |
+| **Processes view** | Full process list with command, uptime, project folder, listener addresses, copy/kill actions |
+| **System view** | Memory, disk, running-process count, and listening-process count without a duplicate listener scan |
+| **Dashboard** | Live counts and uptime/system summaries that track the current view/filter |
 | **Chart** | Relative uptime bars per listener (collapsible) |
-| **Sortable columns** | Click headers to sort (Excel-style), toggle ascending / descending |
-| **Filter** | Search box narrows rows by name, PID, port, bind, project, uptime |
-| **Protect** | 🛡 per row — blocked from Kill (stored in localStorage) |
+| **Sortable columns** | Click port-table headers to sort (Excel-style), toggle ascending / descending |
+| **Filter** | Search box narrows rows by name, PID, port, bind, command, project, cwd, uptime |
+| **Protect** | 🛡 per listener row — blocked from Kill (stored in localStorage) |
 | **Kill confirm** | Modal before SIGKILL; optional **Skip** in ⚙ Settings |
-| **Copy** | ⧉ copies open URL + row fields (tab-separated) |
+| **Copy** | ⧉ copies row fields as tab-separated text |
 | **Open in browser** | Respects **http/https** and optional **path** (⚙ Settings) |
 | **Auto-refresh** | Toolbar: off / 5s / 10s / 30s + **Pause** |
-| **Export** | **CSV** / **JSON** of the current (filtered) table |
+| **Export** | **CSV** / **JSON** of the current filtered view; System exports include metrics plus visible processes |
 | **Bound to** | Human-readable bind, e.g. `localhost:3001` vs `0.0.0.0:3001` |
 | **Kill** | `kill -9` with PID allowlist from the last scan |
 | **Scan as Admin** | Optional `osascript` elevation for a fuller `lsof` view |
@@ -115,10 +118,10 @@ Use a new tag for each release (e.g. `v0.1.1`, `v0.2.0`).
 |------|---------|
 | **Title bar** | App name, **@g-baskin** link to the source repo, **admin** badge when the last scan used elevation |
 | **Header actions** | **⚙ Settings**, **↻ Refresh**, **Scan as Admin** |
-| **Stats strip** | Live counts: open ports, unique processes, average / longest / newest uptime |
-| **Toolbar** (when listeners exist) | **Filter** box, **Auto** refresh interval, **Pause**, **CSV** / **JSON** export |
-| **Uptime chart** | Collapsible bar chart (longest uptime first); click the section header to expand/collapse |
-| **Table** | One row per TCP listener; sortable columns; per-row actions |
+| **Stats strip** | Live counts for the selected view: ports/processes/system metrics |
+| **Toolbar** | **Ports / Processes / System** switcher, **Filter** box, **Auto** refresh interval, **Pause**, **CSV** / **JSON** export |
+| **Uptime chart** | Ports view only; collapsible bar chart (longest uptime first) |
+| **Table** | Ports: one row per TCP listener. Processes/System: one row per process. |
 | **Footer** | Total listeners (or “showing X of Y” when filtered), admin/auto-refresh hints |
 
 ### Sorting
@@ -127,7 +130,7 @@ Click any sortable column header (**Process**, **PID**, **Port**, **Bound to**, 
 
 ### Filter
 
-Type in **Filter by name, PID, port, bind…** to hide non-matching rows. Matching is case-insensitive and checks process name, PID, port, human-readable bind, raw address, project folder name, and uptime text. **Export** (CSV/JSON) exports **only the rows you see** after filtering.
+Type in the toolbar filter to hide non-matching rows. Matching is case-insensitive and checks process name, PID, port/listeners, human-readable bind, raw address, command, project folder, cwd, and uptime text. **Export** (CSV/JSON) exports **only the rows you see** after filtering.
 
 ### Protect (🛡)
 
@@ -168,8 +171,9 @@ Choose **Off**, **5s**, **10s**, or **30s**. When enabled, the app re-runs a nor
 
 ### Export
 
-- **CSV** — Header row plus one row per visible listener (name, pid, port, bound, raw address, uptime, project, cwd).
-- **JSON** — Array of objects for the same visible rows.
+- **Ports CSV/JSON** — One record per visible listener.
+- **Processes CSV/JSON** — One record per visible process.
+- **System CSV/JSON** — System metrics plus visible processes.
 
 Files download with a timestamp in the filename.
 
@@ -186,14 +190,14 @@ Files download with a timestamp in the filename.
 On every push to `main`, [.github/workflows/build-macos.yml](.github/workflows/build-macos.yml):
 
 1. Checks out the repo on **macOS** (GitHub-hosted runner).
-2. Installs Node **22**, Rust stable, runs `npm ci`, `npm run build`, then `npm run tauri build` with **`CI`** unset (`CI: false`) so the Tauri CLI does not mis-parse flags.
+2. Installs Node **22**, uses the pinned Rust toolchain from [`rust-toolchain.toml`](rust-toolchain.toml), runs `npm ci`, `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `npm run build`, then `npm run tauri build` with **`CI`** unset (`CI: false`) so the Tauri CLI does not mis-parse flags.
 3. Uploads the built **`.app`** from `src-tauri/target/release/bundle/macos/` as a workflow **artifact** named `port-scanner-macos-app`.
 
-The artifact matches the **native architecture of the runner** (e.g. Apple Silicon on current `macos-latest`). It is **not** code-signed or notarized unless you add secrets and steps yourself.
+The artifact matches the **native architecture of the pinned macOS runner**. It is **not** code-signed or notarized unless you add secrets and steps yourself.
 
 ### GitHub Actions (CD — Releases)
 
-When you **push a tag** matching `v*` (e.g. `v0.1.0`), [.github/workflows/release-macos.yml](.github/workflows/release-macos.yml) runs: same build as above, then zips the `.app` as **`PortScanner-macos.zip`** and creates a **GitHub Release** with that file attached (`softprops/action-gh-release`). That is the supported way to publish a “real app” for download **without** storing binaries in the git tree.
+When you **push a tag** matching `v*` (e.g. `v0.1.0`), [.github/workflows/release-macos.yml](.github/workflows/release-macos.yml) runs the same formatting, lint, frontend build, and Tauri build gates as CI, then zips the `.app` as **`PortScanner-macos.zip`** and creates a **GitHub Release** with that file attached (`softprops/action-gh-release`). That is the supported way to publish a “real app” for download **without** storing binaries in the git tree.
 
 ### Distribution & code signing (macOS)
 
@@ -226,3 +230,11 @@ This is not legal advice; read the full license text.
 ## Contributing
 
 Issues and pull requests are welcome. For larger changes, open an issue first so we can align on approach (especially for Windows support).
+
+Before submitting, run:
+
+```bash
+npm run check
+```
+
+That command builds the frontend, checks Rust formatting, runs Clippy with warnings denied, and runs Rust unit tests.
