@@ -43,12 +43,32 @@ interface SystemMetrics {
   listening_process_count: number;
 }
 
+interface WeatherSnapshot {
+  temperature: number;
+  humidity: number;
+  windSpeed: number;
+  code: number;
+  updatedAt: string;
+}
+
+interface CachedWeatherSnapshot extends WeatherSnapshot {
+  cachedAt: number;
+}
+
+type WeatherState =
+  | { status: "idle" | "locating" | "loading" }
+  | { status: "ready"; data: WeatherSnapshot }
+  | { status: "error"; message: string };
+
 type KillState = "killing" | "success" | "error";
 type ViewMode = "listeners" | "processes" | "system";
 type KillTarget = PortProcess | RunningProcess;
 
 const REPO_URL = "https://github.com/g-baskin/port-scanner";
+const WEATHER_CACHE_KEY = "port-scanner-weather-v1";
+const WEATHER_CACHE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 type SortKey = "process" | "pid" | "port" | "bind" | "open";
+type ProcessSortKey = "process" | "pid" | "command" | "open" | "listeners";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -110,6 +130,62 @@ function compactCommand(command: string | undefined): string {
   return command.replace(/\s+/g, " ").trim();
 }
 
+function normalizeSearch(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function searchTokens(query: string): string[] {
+  return normalizeSearch(query).split(/\s+/).filter(Boolean);
+}
+
+function matchesSearch(searchText: string, tokens: string[]): boolean {
+  return tokens.every((token) => searchText.includes(token));
+}
+
+function listenerSearchText(p: PortProcess): string {
+  const bind = formatBind(p.address);
+  return normalizeSearch([
+    p.name,
+    `name:${p.name}`,
+    String(p.pid),
+    `pid:${p.pid}`,
+    p.port,
+    `:${p.port}`,
+    `port:${p.port}`,
+    bind,
+    `bind:${bind}`,
+    p.address,
+    `addr:${p.address}`,
+    compactCommand(p.command),
+    p.project ?? "",
+    p.cwd ?? "",
+    p.uptime ?? "",
+  ].join(" "));
+}
+
+function runningProcessSearchText(p: RunningProcess): string {
+  const listeners = p.listener_addresses.map(formatBind).join(" ");
+  return normalizeSearch([
+    p.name,
+    `name:${p.name}`,
+    String(p.pid),
+    `pid:${p.pid}`,
+    compactCommand(p.command),
+    `cmd:${compactCommand(p.command)}`,
+    p.project ?? "",
+    p.cwd ?? "",
+    p.uptime ?? "",
+    listeners,
+    `bind:${listeners}`,
+    p.listener_addresses.join(" "),
+    `listeners:${p.listener_addresses.length}`,
+  ].join(" "));
+}
+
 function formatBytes(bytes: number | undefined): string {
   if (!bytes || bytes <= 0) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -131,6 +207,61 @@ function buildOpenUrl(port: string, s: Pick<AppSettings, "openScheme" | "openPat
   const normalized = path && !path.startsWith("/") ? `/${path}` : path;
   const base = `${s.openScheme}://localhost:${port}`;
   return normalized ? `${base}${normalized}` : base;
+}
+
+function weatherCodeLabel(code: number): string {
+  if (code === 0) return "Clear";
+  if ([1, 2, 3].includes(code)) return "Clouds";
+  if ([45, 48].includes(code)) return "Fog";
+  if ([51, 53, 55, 56, 57].includes(code)) return "Drizzle";
+  if ([61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return "Rain";
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return "Snow";
+  if ([95, 96, 99].includes(code)) return "Storm";
+  return "Weather";
+}
+
+function loadCachedWeather(): WeatherState {
+  if (typeof window === "undefined") return { status: "idle" };
+  try {
+    const raw = localStorage.getItem(WEATHER_CACHE_KEY);
+    if (!raw) return { status: "idle" };
+    const cached = JSON.parse(raw) as Partial<CachedWeatherSnapshot>;
+    if (
+      typeof cached.temperature !== "number" ||
+      typeof cached.humidity !== "number" ||
+      typeof cached.windSpeed !== "number" ||
+      typeof cached.code !== "number" ||
+      typeof cached.updatedAt !== "string" ||
+      typeof cached.cachedAt !== "number" ||
+      Date.now() - cached.cachedAt > WEATHER_CACHE_MAX_AGE_MS
+    ) {
+      return { status: "idle" };
+    }
+    return {
+      status: "ready",
+      data: {
+        temperature: cached.temperature,
+        humidity: cached.humidity,
+        windSpeed: cached.windSpeed,
+        code: cached.code,
+        updatedAt: cached.updatedAt,
+      },
+    };
+  } catch {
+    return { status: "idle" };
+  }
+}
+
+function saveCachedWeather(snapshot: WeatherSnapshot) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(
+      WEATHER_CACHE_KEY,
+      JSON.stringify({ ...snapshot, cachedAt: Date.now() } satisfies CachedWeatherSnapshot)
+    );
+  } catch {
+    // Weather cache is best-effort; the in-memory readout still applies.
+  }
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -296,6 +427,34 @@ function SystemPanel({ metrics }: { metrics: SystemMetrics | null }) {
   );
 }
 
+function WeatherPanel({ weather, onLoad }: { weather: WeatherState; onLoad: () => void }) {
+  const busy = weather.status === "locating" || weather.status === "loading";
+
+  return (
+    <div className={`weather-panel weather-${weather.status}`} aria-label="Local weather">
+      <div className="weather-title">
+        <span className="weather-led" />
+        <span>LOCAL WX</span>
+      </div>
+      {weather.status === "ready" ? (
+        <>
+          <strong>{Math.round(weather.data.temperature)}°F</strong>
+          <span>{weatherCodeLabel(weather.data.code)}</span>
+          <span>{Math.round(weather.data.windSpeed)} mph · {weather.data.humidity}% RH</span>
+        </>
+      ) : (
+        <>
+          <strong>{busy ? "SYNC" : "—"}</strong>
+          <span>{weather.status === "error" ? weather.message : "Location permission required"}</span>
+          <button type="button" className="weather-action" onClick={onLoad} disabled={busy}>
+            {busy ? "Locating" : "Enable WX"}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function UptimeChart({ processes }: { processes: PortProcess[] }) {
   const [animated, setAnimated] = useState(false);
   const prevKey = useRef("");
@@ -369,12 +528,17 @@ function App() {
   const [chartOpen, setChartOpen] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("port");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [processSortKey, setProcessSortKey] = useState<ProcessSortKey>("pid");
+  const [processSortDir, setProcessSortDir] = useState<"asc" | "desc">("asc");
+  const [selectedPortKey, setSelectedPortKey] = useState<string | null>(null);
+  const [selectedProcessKey, setSelectedProcessKey] = useState<string | null>(null);
   const [filterText, setFilterText] = useState("");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingKill, setPendingKill] = useState<KillTarget | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [autoPaused, setAutoPaused] = useState(false);
+  const [weather, setWeather] = useState<WeatherState>(() => loadCachedWeather());
 
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -382,6 +546,80 @@ function App() {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast(msg);
     toastTimer.current = setTimeout(() => setToast(null), 2200);
+  }, []);
+
+  const loadWeather = useCallback(() => {
+    const fetchWeather = async (latitude: number, longitude: number) => {
+      setWeather((prev) => (prev.status === "ready" ? prev : { status: "loading" }));
+      const params = new URLSearchParams({
+        latitude: latitude.toFixed(4),
+        longitude: longitude.toFixed(4),
+        current: "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
+        temperature_unit: "fahrenheit",
+        wind_speed_unit: "mph",
+      });
+      const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`);
+      if (!response.ok) throw new Error("Weather unavailable");
+      const body = await response.json() as {
+        current?: {
+          temperature_2m?: number;
+          relative_humidity_2m?: number;
+          weather_code?: number;
+          wind_speed_10m?: number;
+          time?: string;
+        };
+      };
+      const current = body.current;
+      if (!current || current.temperature_2m == null) throw new Error("Weather unavailable");
+      const snapshot: WeatherSnapshot = {
+        temperature: current.temperature_2m,
+        humidity: current.relative_humidity_2m ?? 0,
+        windSpeed: current.wind_speed_10m ?? 0,
+        code: current.weather_code ?? -1,
+        updatedAt: current.time ?? new Date().toISOString(),
+      };
+      saveCachedWeather(snapshot);
+      setWeather({ status: "ready", data: snapshot });
+    };
+
+    const fetchApproxWeather = async () => {
+      try {
+        setWeather((prev) => (prev.status === "ready" ? prev : { status: "loading" }));
+        const response = await fetch("https://ipapi.co/json/");
+        if (!response.ok) throw new Error("Weather unavailable");
+        const location = await response.json() as { latitude?: number; longitude?: number };
+        if (typeof location.latitude !== "number" || typeof location.longitude !== "number") {
+          throw new Error("Weather unavailable");
+        }
+        await fetchWeather(location.latitude, location.longitude);
+      } catch (e) {
+        setWeather((prev) =>
+          prev.status === "ready"
+            ? prev
+            : { status: "error", message: e instanceof Error ? e.message : "Weather unavailable" }
+        );
+      }
+    };
+
+    if (!navigator.geolocation) {
+      void fetchApproxWeather();
+      return;
+    }
+
+    setWeather((prev) => (prev.status === "ready" ? prev : { status: "locating" }));
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        void fetchWeather(coords.latitude, coords.longitude).catch((e) => {
+          setWeather((prev) =>
+            prev.status === "ready"
+              ? prev
+              : { status: "error", message: e instanceof Error ? e.message : "Weather unavailable" }
+          );
+        });
+      },
+      () => void fetchApproxWeather(),
+      { enableHighAccuracy: false, maximumAge: 900_000, timeout: 10_000 }
+    );
   }, []);
 
   const patchSettings = useCallback((patch: Partial<AppSettings>) => {
@@ -399,6 +637,17 @@ function App() {
         return prev;
       }
       setSortDir("asc");
+      return key;
+    });
+  }, []);
+
+  const toggleProcessSort = useCallback((key: ProcessSortKey) => {
+    setProcessSortKey((prev) => {
+      if (prev === key) {
+        setProcessSortDir((d) => (d === "asc" ? "desc" : "asc"));
+        return prev;
+      }
+      setProcessSortDir("asc");
       return key;
     });
   }, []);
@@ -433,53 +682,47 @@ function App() {
     return list;
   }, [processes, sortKey, sortDir]);
 
-  const q = filterText.trim().toLowerCase();
+  const queryTokens = useMemo(() => searchTokens(filterText), [filterText]);
+  const q = queryTokens.join(" ");
   const filteredProcesses = useMemo(() => {
-    if (!q) return sortedProcesses;
-    return sortedProcesses.filter((p) => {
-      const hay = [
-        p.name,
-        String(p.pid),
-        p.port,
-        formatBind(p.address),
-        p.address,
-        p.command ?? "",
-        p.project ?? "",
-        p.cwd ?? "",
-        p.uptime ?? "",
-      ]
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(q);
-    });
-  }, [sortedProcesses, q]);
+    if (queryTokens.length === 0) return sortedProcesses;
+    return sortedProcesses.filter((p) => matchesSearch(listenerSearchText(p), queryTokens));
+  }, [sortedProcesses, queryTokens]);
 
-  const sortedRunningProcesses = useMemo(
-    () =>
-      [...runningProcesses].sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) ||
-        a.pid - b.pid
-      ),
-    [runningProcesses]
-  );
+  const sortedRunningProcesses = useMemo(() => {
+    const list = [...runningProcesses];
+    const mul = processSortDir === "asc" ? 1 : -1;
+    list.sort((a, b) => {
+      let cmp = 0;
+      switch (processSortKey) {
+        case "process":
+          cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+          break;
+        case "pid":
+          cmp = a.pid - b.pid;
+          break;
+        case "command":
+          cmp = compactCommand(a.command).localeCompare(compactCommand(b.command), undefined, { sensitivity: "base" });
+          break;
+        case "open":
+          cmp = parseUptimeSecs(a.uptime) - parseUptimeSecs(b.uptime);
+          break;
+        case "listeners":
+          cmp = a.listener_addresses.length - b.listener_addresses.length;
+          break;
+        default:
+          break;
+      }
+      if (cmp !== 0) return cmp * mul;
+      return a.pid - b.pid || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+    return list;
+  }, [runningProcesses, processSortKey, processSortDir]);
 
   const filteredRunningProcesses = useMemo(() => {
-    if (!q) return sortedRunningProcesses;
-    return sortedRunningProcesses.filter((p) => {
-      const hay = [
-        p.name,
-        String(p.pid),
-        p.command,
-        p.project ?? "",
-        p.cwd ?? "",
-        p.uptime ?? "",
-        p.listener_addresses.map(formatBind).join(" "),
-      ]
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(q);
-    });
-  }, [sortedRunningProcesses, q]);
+    if (queryTokens.length === 0) return sortedRunningProcesses;
+    return sortedRunningProcesses.filter((p) => matchesSearch(runningProcessSearchText(p), queryTokens));
+  }, [sortedRunningProcesses, queryTokens]);
 
   const scan = useCallback(
     async (admin = false, opts?: { preserveRowState?: boolean }) => {
@@ -586,8 +829,8 @@ function App() {
   }, [scan]);
 
   useEffect(() => {
-    if (viewMode === "processes" && runningProcesses.length === 0) {
-      scanRunningProcesses();
+    if (runningProcesses.length === 0) {
+      scanRunningProcesses({ preserveRowState: true });
     }
     if (viewMode === "system" && !systemMetrics) {
       scanSystem();
@@ -751,6 +994,45 @@ function App() {
         ? runningProcesses.length > 0
         : Boolean(systemMetrics) || runningProcesses.length > 0;
 
+  const cockpitModeLabel =
+    viewMode === "listeners"
+      ? "PORT RADAR"
+      : viewMode === "processes"
+        ? "PROCESS SCOPE"
+        : "SYSTEM TELEMETRY";
+  const cockpitHealth = scanError ? "FAULT" : loading ? "SCANNING" : "NOMINAL";
+  const cockpitHealthTone = scanError ? "danger" : loading ? "warn" : "ok";
+  const autoStatus =
+    settings.autoRefreshSec <= 0
+      ? "MANUAL"
+      : autoPaused
+        ? "AUTO HOLD"
+        : `AUTO ${settings.autoRefreshSec}s`;
+  const displayPorts = filteredProcesses;
+  const displayProcesses = filteredRunningProcesses;
+
+  useEffect(() => {
+    if (selectedPortKey && !processes.some((p) => rowKey(p) === selectedPortKey)) {
+      setSelectedPortKey(null);
+    }
+  }, [processes, selectedPortKey]);
+
+  useEffect(() => {
+    if (selectedProcessKey && !runningProcesses.some((p) => processKey(p) === selectedProcessKey)) {
+      setSelectedProcessKey(null);
+    }
+  }, [runningProcesses, selectedProcessKey]);
+
+  const selectFirstPort = useCallback(() => {
+    const first = filteredProcesses[0];
+    setSelectedPortKey(first ? rowKey(first) : null);
+  }, [filteredProcesses]);
+
+  const selectFirstProcess = useCallback(() => {
+    const first = filteredRunningProcesses[0];
+    setSelectedProcessKey(first ? processKey(first) : null);
+  }, [filteredRunningProcesses]);
+
   return (
     <div className="app">
       {toast && <div className="toast">{toast}</div>}
@@ -872,33 +1154,37 @@ function App() {
         </div>
       )}
 
-      <header className="header">
+      <header className="header cockpit-panel">
         <div className="header-title">
-          <span className="header-dot" />
-          <h1>
-            <span className="header-title-main">PORT SCANNER</span>
-            <span className="header-title-handle">
-              {" - created by "}
-              <button
-                type="button"
-                className="header-repo-link"
-                onClick={() => void invoke("open_url", { url: REPO_URL })}
-                title={`Open ${REPO_URL}`}
-              >
-                @g-baskin
-              </button>
-            </span>
-          </h1>
-          {isAdmin && viewMode === "listeners" && <span className="admin-badge">admin</span>}
+          <span className={`header-dot header-dot-${cockpitHealthTone}`} />
+          <div className="header-copy">
+            <h1>
+              <span className="header-title-main">PORT SCANNER</span>
+              <span className="header-title-handle">
+                {" // "}
+                <button
+                  type="button"
+                  className="header-repo-link"
+                  onClick={() => void invoke("open_url", { url: REPO_URL })}
+                  title={`Open ${REPO_URL}`}
+                >
+                  @g-baskin
+                </button>
+              </span>
+            </h1>
+            <span className="header-subtitle">LOCALHOST AIRSPACE CONTROL</span>
+          </div>
+          {isAdmin && viewMode === "listeners" && <span className="admin-badge">ELEVATED</span>}
         </div>
         <div className="header-actions">
+          <WeatherPanel weather={weather} onLoad={loadWeather} />
           <button
             type="button"
             className="btn btn-ghost"
             title="Preferences"
             onClick={() => setSettingsOpen(true)}
           >
-            ⚙
+            ⚙ SYS
           </button>
           <button
             type="button"
@@ -907,7 +1193,7 @@ function App() {
             disabled={loading}
             title="Re-scan"
           >
-            {loading ? "Refreshing…" : "↻ Refresh"}
+            {loading ? "Pinging…" : "↻ Ping"}
           </button>
           <button
             type="button"
@@ -916,52 +1202,77 @@ function App() {
             disabled={loading || viewMode !== "listeners"}
             title={viewMode !== "listeners" ? "Admin scan applies to ports" : "Prompts for admin password"}
           >
-            Scan as Admin
+            Admin Sweep
           </button>
         </div>
       </header>
 
-      <div className="stats-bar">
-        <StatCard
-          icon="◉"
-          label={viewMode === "listeners" ? "Open Ports" : "Running"}
-          value={stats.portCount}
-          color="#00e87e"
-          dim="rgba(0,232,126,0.1)"
-        />
-        <div className="stats-divider" />
-        <StatCard
-          icon="⬡"
-          label={viewMode === "system" ? "Listening" : viewMode === "listeners" ? "Processes" : "Listening"}
-          value={stats.pidCount}
-          color="#3d94ff"
-          dim="rgba(61,148,255,0.1)"
-        />
-        <div className="stats-divider" />
-        <StatCard
-          icon="∅"
-          label={viewMode === "system" ? "Memory Free" : viewMode === "listeners" ? "Avg Open" : "Avg Age"}
-          value={stats.avg}
-          color="#b8cfe8"
-          dim="rgba(184,207,232,0.06)"
-        />
-        <div className="stats-divider" />
-        <StatCard
-          icon="↑"
-          label={viewMode === "system" ? "Disk Free" : "Longest"}
-          value={stats.longest}
-          color="#ff3d5a"
-          dim="rgba(255,61,90,0.1)"
-        />
-        <div className="stats-divider" />
-        <StatCard
-          icon="↓"
-          label={viewMode === "system" ? "Mem Used" : "Newest"}
-          value={stats.newest}
-          color="#00e87e"
-          dim="rgba(0,232,126,0.1)"
-        />
-      </div>
+      <section className="cockpit-dashboard" aria-label="Scanner dashboard">
+        <div className="mission-card cockpit-panel">
+          <div className="mission-radar" aria-hidden="true">
+            <span className="radar-sweep" />
+            <span className="radar-blip radar-blip-one" />
+            <span className="radar-blip radar-blip-two" />
+          </div>
+          <div className="mission-copy">
+            <span className="eyebrow">ACTIVE MODE</span>
+            <strong>{cockpitModeLabel}</strong>
+            <span>{q ? `FILTER LOCK: ${q}` : "FULL FIELD MONITORING"}</span>
+          </div>
+        </div>
+
+        <div className="stats-bar cockpit-panel">
+          <StatCard
+            icon="◉"
+            label={viewMode === "listeners" ? "Open Ports" : "Running"}
+            value={stats.portCount}
+            color="#00e87e"
+            dim="rgba(0,232,126,0.1)"
+          />
+          <div className="stats-divider" />
+          <StatCard
+            icon="⬡"
+            label={viewMode === "system" ? "Listening" : viewMode === "listeners" ? "Processes" : "Listening"}
+            value={stats.pidCount}
+            color="#3d94ff"
+            dim="rgba(61,148,255,0.1)"
+          />
+          <div className="stats-divider" />
+          <StatCard
+            icon="∅"
+            label={viewMode === "system" ? "Memory Free" : viewMode === "listeners" ? "Avg Open" : "Avg Age"}
+            value={stats.avg}
+            color="#b8cfe8"
+            dim="rgba(184,207,232,0.06)"
+          />
+          <div className="stats-divider" />
+          <StatCard
+            icon="↑"
+            label={viewMode === "system" ? "Disk Free" : "Longest"}
+            value={stats.longest}
+            color="#ff3d5a"
+            dim="rgba(255,61,90,0.1)"
+          />
+          <div className="stats-divider" />
+          <StatCard
+            icon="↓"
+            label={viewMode === "system" ? "Mem Used" : "Newest"}
+            value={stats.newest}
+            color="#00e87e"
+            dim="rgba(0,232,126,0.1)"
+          />
+        </div>
+
+        <div className="status-stack cockpit-panel" aria-label="Status indicators">
+          <span className={`status-chip status-${cockpitHealthTone}`}>
+            <span className="status-led" />{cockpitHealth}
+          </span>
+          <span className="status-chip status-info">{autoStatus}</span>
+          <span className={`status-chip ${isAdmin && viewMode === "listeners" ? "status-warn" : "status-idle"}`}>
+            {isAdmin && viewMode === "listeners" ? "ADMIN" : "STD AUTH"}
+          </span>
+        </div>
+      </section>
 
       <div className="content">
         {scanError && (
@@ -997,7 +1308,7 @@ function App() {
           <input
             type="search"
             className="toolbar-filter"
-            placeholder={viewMode === "listeners" ? "Filter by name, PID, port, bind…" : "Filter by app, PID, command, folder…"}
+            placeholder={viewMode === "listeners" ? "Filter name, pid:123, port:3000, bind:localhost…" : "Filter name, pid:123, cmd, bind, folder…"}
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
             aria-label={viewMode === "listeners" ? "Filter listeners" : "Filter processes"}
@@ -1046,6 +1357,135 @@ function App() {
             </button>
           </div>
         </div>
+
+        <section className="mfd-grid" aria-label="Ports and processes tactical displays">
+          <div className="mfd-panel mfd-ports">
+            <div className="mfd-header">
+              <div>
+                <span className="mfd-kicker">LEFT MFD</span>
+                <strong>PORTS</strong>
+              </div>
+              <div className="mfd-header-actions">
+                <button
+                  type="button"
+                  className="mfd-link"
+                  onClick={() => toggleSort("port")}
+                  title="Toggle port sort ascending/descending"
+                >
+                  Port {sortKey === "port" ? (sortDir === "asc" ? "▲" : "▼") : "⇅"}
+                </button>
+                <button type="button" className="mfd-link" onClick={selectFirstPort}>
+                  Select 1st
+                </button>
+                <button type="button" className="mfd-link" onClick={() => setViewMode("listeners")}>
+                  Focus
+                </button>
+              </div>
+            </div>
+            <div className="mfd-list">
+              {displayPorts.length === 0 ? (
+                <div className="mfd-empty">No port contacts</div>
+              ) : (
+                displayPorts.map((p) => {
+                  const key = rowKey(p);
+                  const ks = killStates.get(key);
+                  const prot = isProtected(p);
+                  const openUrl = buildOpenUrl(p.port, settings);
+                  return (
+                    <div
+                      key={key}
+                      className={`mfd-row${prot ? " mfd-row-protected" : ""}${selectedPortKey === key ? " mfd-row-selected" : ""}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={selectedPortKey === key}
+                      onClick={() => setSelectedPortKey(key)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") setSelectedPortKey(key);
+                      }}
+                    >
+                      <div className="mfd-primary">
+                        <span className="mfd-port">:{p.port}</span>
+                        <span>{p.name}</span>
+                      </div>
+                      <span className="mfd-meta">PID {p.pid} · {formatBind(p.address)}</span>
+                      <div className="mfd-actions" onClick={(e) => e.stopPropagation()}>
+                        <button type="button" onClick={() => void copyRowLine(p)}>Copy</button>
+                        <button type="button" onClick={() => void invoke("open_url", { url: openUrl })}>Open</button>
+                        <button type="button" disabled={ks === "killing" || ks === "success" || prot} onClick={() => requestKill(p)}>
+                          {prot ? "Safe" : ks === "killing" ? "Kill…" : "Kill"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          <div className="mfd-panel mfd-processes">
+            <div className="mfd-header">
+              <div>
+                <span className="mfd-kicker">RIGHT MFD</span>
+                <strong>PROCESSES</strong>
+              </div>
+              <div className="mfd-header-actions">
+                <button
+                  type="button"
+                  className="mfd-link"
+                  onClick={() => toggleProcessSort("pid")}
+                  title="Toggle PID sort ascending/descending"
+                >
+                  PID {processSortKey === "pid" ? (processSortDir === "asc" ? "▲" : "▼") : "⇅"}
+                </button>
+                <button type="button" className="mfd-link" onClick={selectFirstProcess}>
+                  Select 1st
+                </button>
+                <button type="button" className="mfd-link" onClick={() => setViewMode("processes")}>
+                  Focus
+                </button>
+              </div>
+            </div>
+            <div className="mfd-list">
+              {displayProcesses.length === 0 ? (
+                <div className="mfd-empty">No process contacts</div>
+              ) : (
+                displayProcesses.map((p) => {
+                  const key = processKey(p);
+                  const ks = killStates.get(key);
+                  return (
+                    <div
+                      key={key}
+                      className={`mfd-row${selectedProcessKey === key ? " mfd-row-selected" : ""}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={selectedProcessKey === key}
+                      onClick={() => setSelectedProcessKey(key)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") setSelectedProcessKey(key);
+                      }}
+                    >
+                      <div className="mfd-primary">
+                        <span>{p.name}</span>
+                        <span className="mfd-pid">PID {p.pid}</span>
+                      </div>
+                      <span className="mfd-meta">
+                        {p.listener_addresses.length > 0
+                          ? p.listener_addresses.map(formatBind).join(" · ")
+                          : compactCommand(p.command)}
+                      </span>
+                      <div className="mfd-actions" onClick={(e) => e.stopPropagation()}>
+                        <button type="button" onClick={() => void copyProcessLine(p)}>Copy</button>
+                        <button type="button" disabled={ks === "killing" || ks === "success"} onClick={() => requestKill(p)}>
+                          {ks === "killing" ? "Kill…" : "Kill"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </section>
 
         {loading && !hasRows ? (
           <div className="empty-state">
@@ -1211,7 +1651,7 @@ function App() {
                       return (
                         <tr
                           key={key}
-                          className={
+                          className={`${
                             prot
                               ? "row row-protected"
                               : ks === "success"
@@ -1219,9 +1659,11 @@ function App() {
                                 : ks === "error"
                                   ? "row row-error"
                                   : "row"
-                          }
+                          }${selectedPortKey === key ? " row-selected" : ""}`}
+                          aria-selected={selectedPortKey === key}
+                          onClick={() => setSelectedPortKey(key)}
                         >
-                          <td className="col-prot">
+                          <td className="col-prot" onClick={(e) => e.stopPropagation()}>
                             <button
                               type="button"
                               className={`btn-prot${prot ? " btn-prot-on" : ""}`}
@@ -1254,7 +1696,7 @@ function App() {
                             {formatBind(p.address)}
                           </td>
                           <td className="col-open">{p.uptime ?? "—"}</td>
-                          <td className="col-action">
+                          <td className="col-action" onClick={(e) => e.stopPropagation()}>
                             {errMsg && (
                               <span className="kill-error-tip" title={errMsg}>
                                 ⚠
@@ -1314,11 +1756,96 @@ function App() {
               <table className="process-table">
                 <thead>
                   <tr>
-                    <th>Process</th>
-                    <th>PID</th>
-                    <th>Command</th>
-                    <th>Open</th>
-                    <th>Listeners</th>
+                    <th className="col-sort">
+                      <button
+                        type="button"
+                        className={`th-sort${processSortKey === "process" ? " th-sort-active" : ""}`}
+                        onClick={() => toggleProcessSort("process")}
+                      >
+                        Process
+                        {processSortKey === "process" ? (
+                          <span className="th-sort-arrow">
+                            {processSortDir === "asc" ? "▲" : "▼"}
+                          </span>
+                        ) : (
+                          <span className="th-sort-dim" aria-hidden>
+                            ⇅
+                          </span>
+                        )}
+                      </button>
+                    </th>
+                    <th className="col-sort">
+                      <button
+                        type="button"
+                        className={`th-sort${processSortKey === "pid" ? " th-sort-active" : ""}`}
+                        onClick={() => toggleProcessSort("pid")}
+                      >
+                        PID
+                        {processSortKey === "pid" ? (
+                          <span className="th-sort-arrow">
+                            {processSortDir === "asc" ? "▲" : "▼"}
+                          </span>
+                        ) : (
+                          <span className="th-sort-dim" aria-hidden>
+                            ⇅
+                          </span>
+                        )}
+                      </button>
+                    </th>
+                    <th className="col-sort">
+                      <button
+                        type="button"
+                        className={`th-sort${processSortKey === "command" ? " th-sort-active" : ""}`}
+                        onClick={() => toggleProcessSort("command")}
+                      >
+                        Command
+                        {processSortKey === "command" ? (
+                          <span className="th-sort-arrow">
+                            {processSortDir === "asc" ? "▲" : "▼"}
+                          </span>
+                        ) : (
+                          <span className="th-sort-dim" aria-hidden>
+                            ⇅
+                          </span>
+                        )}
+                      </button>
+                    </th>
+                    <th className="col-sort">
+                      <button
+                        type="button"
+                        className={`th-sort${processSortKey === "open" ? " th-sort-active" : ""}`}
+                        onClick={() => toggleProcessSort("open")}
+                      >
+                        Open
+                        {processSortKey === "open" ? (
+                          <span className="th-sort-arrow">
+                            {processSortDir === "asc" ? "▲" : "▼"}
+                          </span>
+                        ) : (
+                          <span className="th-sort-dim" aria-hidden>
+                            ⇅
+                          </span>
+                        )}
+                      </button>
+                    </th>
+                    <th className="col-sort">
+                      <button
+                        type="button"
+                        className={`th-sort${processSortKey === "listeners" ? " th-sort-active" : ""}`}
+                        onClick={() => toggleProcessSort("listeners")}
+                      >
+                        Listeners
+                        {processSortKey === "listeners" ? (
+                          <span className="th-sort-arrow">
+                            {processSortDir === "asc" ? "▲" : "▼"}
+                          </span>
+                        ) : (
+                          <span className="th-sort-dim" aria-hidden>
+                            ⇅
+                          </span>
+                        )}
+                      </button>
+                    </th>
                     <th className="th-actions" aria-label="Actions" />
                   </tr>
                 </thead>
@@ -1337,13 +1864,15 @@ function App() {
                       return (
                         <tr
                           key={key}
-                          className={
+                          className={`${
                             ks === "success"
                               ? "row row-success"
                               : ks === "error"
                                 ? "row row-error"
                                 : "row"
-                          }
+                          }${selectedProcessKey === key ? " row-selected" : ""}`}
+                          aria-selected={selectedProcessKey === key}
+                          onClick={() => setSelectedProcessKey(key)}
                         >
                           <td className="col-name">
                             <span className="col-name-text">{p.name}</span>
@@ -1363,7 +1892,7 @@ function App() {
                               ? p.listener_addresses.map(formatBind).join(", ")
                               : "—"}
                           </td>
-                          <td className="col-action">
+                          <td className="col-action" onClick={(e) => e.stopPropagation()}>
                             {errMsg && (
                               <span className="kill-error-tip" title={errMsg}>
                                 ⚠
