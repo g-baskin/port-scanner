@@ -10,12 +10,42 @@ interface PortProcess {
   pid: number;
   port: string;
   address: string;
+  command?: string;
   project?: string;
   cwd?: string;
   uptime?: string;
 }
 
+interface RunningProcess {
+  name: string;
+  pid: number;
+  command: string;
+  project?: string;
+  cwd?: string;
+  uptime?: string;
+  listener_addresses: string[];
+}
+
+interface ByteMetrics {
+  total_bytes: number;
+  used_bytes: number;
+  available_bytes: number;
+}
+
+interface DiskMetrics extends ByteMetrics {
+  mount: string;
+}
+
+interface SystemMetrics {
+  memory: ByteMetrics;
+  disk: DiskMetrics;
+  process_count: number;
+  listening_process_count: number;
+}
+
 type KillState = "killing" | "success" | "error";
+type ViewMode = "listeners" | "processes" | "system";
+type KillTarget = PortProcess | RunningProcess;
 
 const REPO_URL = "https://github.com/g-baskin/port-scanner";
 type SortKey = "process" | "pid" | "port" | "bind" | "open";
@@ -67,6 +97,35 @@ function rowKey(p: PortProcess): string {
   return `${p.pid}-${p.port}-${p.address}`;
 }
 
+function processKey(p: Pick<RunningProcess, "pid">): string {
+  return `process-${p.pid}`;
+}
+
+function killKey(p: KillTarget): string {
+  return "port" in p ? rowKey(p) : processKey(p);
+}
+
+function compactCommand(command: string | undefined): string {
+  if (!command) return "";
+  return command.replace(/\s+/g, " ").trim();
+}
+
+function formatBytes(bytes: number | undefined): string {
+  if (!bytes || bytes <= 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function percentUsed(used: number, total: number): number {
+  return total > 0 ? Math.round((used / total) * 100) : 0;
+}
+
 function buildOpenUrl(port: string, s: Pick<AppSettings, "openScheme" | "openPath">): string {
   const path = (s.openPath || "").trim();
   const normalized = path && !path.startsWith("/") ? `/${path}` : path;
@@ -101,6 +160,7 @@ function toCsv(rows: PortProcess[]): string {
     "port",
     "bound",
     "address_raw",
+    "command",
     "uptime",
     "project",
     "cwd",
@@ -114,9 +174,30 @@ function toCsv(rows: PortProcess[]): string {
         esc(p.port),
         esc(formatBind(p.address)),
         esc(p.address),
+        esc(p.command ?? ""),
         esc(p.uptime ?? ""),
         esc(p.project ?? ""),
         esc(p.cwd ?? ""),
+      ].join(",")
+    );
+  }
+  return lines.join("\n");
+}
+
+function processesToCsv(rows: RunningProcess[]): string {
+  const esc = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
+  const header = ["name", "pid", "command", "uptime", "project", "cwd", "listeners"];
+  const lines = [header.join(",")];
+  for (const p of rows) {
+    lines.push(
+      [
+        esc(p.name),
+        p.pid,
+        esc(p.command),
+        esc(p.uptime ?? ""),
+        esc(p.project ?? ""),
+        esc(p.cwd ?? ""),
+        esc(p.listener_addresses.map(formatBind).join(" ")),
       ].join(",")
     );
   }
@@ -144,6 +225,35 @@ function StatCard({ label, value, color, dim, icon }: StatCardProps) {
       <span className="stat-icon">{icon}</span>
       <span className="stat-value">{value}</span>
       <span className="stat-label">{label}</span>
+    </div>
+  );
+}
+
+function SystemPanel({ metrics }: { metrics: SystemMetrics | null }) {
+  if (!metrics) return null;
+  const memoryPct = percentUsed(metrics.memory.used_bytes, metrics.memory.total_bytes);
+  const diskPct = percentUsed(metrics.disk.used_bytes, metrics.disk.total_bytes);
+
+  return (
+    <div className="system-panel">
+      <div className="system-card">
+        <span className="system-card-label">Memory</span>
+        <strong>{formatBytes(metrics.memory.used_bytes)}</strong>
+        <span>{formatBytes(metrics.memory.available_bytes)} available of {formatBytes(metrics.memory.total_bytes)}</span>
+        <div className="system-meter"><span style={{ width: `${memoryPct}%` }} /></div>
+      </div>
+      <div className="system-card">
+        <span className="system-card-label">Disk {metrics.disk.mount}</span>
+        <strong>{formatBytes(metrics.disk.available_bytes)} free</strong>
+        <span>{formatBytes(metrics.disk.used_bytes)} used of {formatBytes(metrics.disk.total_bytes)}</span>
+        <div className="system-meter system-meter-disk"><span style={{ width: `${diskPct}%` }} /></div>
+      </div>
+      <div className="system-card">
+        <span className="system-card-label">Processes</span>
+        <strong>{metrics.process_count}</strong>
+        <span>{metrics.listening_process_count} listening on TCP ports</span>
+        <div className="system-meter system-meter-process"><span style={{ width: `${Math.min(metrics.listening_process_count * 2, 100)}%` }} /></div>
+      </div>
     </div>
   );
 }
@@ -210,6 +320,9 @@ function UptimeChart({ processes }: { processes: PortProcess[] }) {
 
 function App() {
   const [processes, setProcesses] = useState<PortProcess[]>([]);
+  const [runningProcesses, setRunningProcesses] = useState<RunningProcess[]>([]);
+  const [systemMetrics, setSystemMetrics] = useState<SystemMetrics | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("listeners");
   const [loading, setLoading] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [killStates, setKillStates] = useState<Map<string, KillState>>(new Map());
@@ -221,7 +334,7 @@ function App() {
   const [filterText, setFilterText] = useState("");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [pendingKill, setPendingKill] = useState<PortProcess | null>(null);
+  const [pendingKill, setPendingKill] = useState<KillTarget | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [autoPaused, setAutoPaused] = useState(false);
 
@@ -292,7 +405,9 @@ function App() {
         p.port,
         formatBind(p.address),
         p.address,
+        p.command ?? "",
         p.project ?? "",
+        p.cwd ?? "",
         p.uptime ?? "",
       ]
         .join(" ")
@@ -300,6 +415,33 @@ function App() {
       return hay.includes(q);
     });
   }, [sortedProcesses, q]);
+
+  const sortedRunningProcesses = useMemo(
+    () =>
+      [...runningProcesses].sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) ||
+        a.pid - b.pid
+      ),
+    [runningProcesses]
+  );
+
+  const filteredRunningProcesses = useMemo(() => {
+    if (!q) return sortedRunningProcesses;
+    return sortedRunningProcesses.filter((p) => {
+      const hay = [
+        p.name,
+        String(p.pid),
+        p.command,
+        p.project ?? "",
+        p.cwd ?? "",
+        p.uptime ?? "",
+        p.listener_addresses.map(formatBind).join(" "),
+      ]
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [sortedRunningProcesses, q]);
 
   const scan = useCallback(
     async (admin = false, opts?: { preserveRowState?: boolean }) => {
@@ -326,18 +468,104 @@ function App() {
     []
   );
 
+  const scanRunningProcesses = useCallback(
+    async (opts?: { preserveRowState?: boolean }) => {
+      const preserve = opts?.preserveRowState ?? false;
+      if (!preserve) {
+        setKillStates(new Map());
+        setKillErrors(new Map());
+        setScanError(null);
+        setLoading(true);
+      }
+      try {
+        const result = await invoke<RunningProcess[]>("list_processes");
+        setRunningProcesses(result);
+        if (!preserve) setScanError(null);
+      } catch (e) {
+        if (!preserve) setScanError(String(e));
+      } finally {
+        if (!preserve) setLoading(false);
+      }
+    },
+    []
+  );
+
+  const scanSystem = useCallback(
+    async (opts?: { preserveRowState?: boolean }) => {
+      const preserve = opts?.preserveRowState ?? false;
+      if (!preserve) {
+        setKillStates(new Map());
+        setKillErrors(new Map());
+        setScanError(null);
+        setLoading(true);
+      }
+      let error: string | null = null;
+      const processRowsPromise = invoke<RunningProcess[]>("list_processes").then(
+        (rows) => ({ rows, error: null as string | null }),
+        (e) => ({ rows: null, error: String(e) })
+      );
+      try {
+        const metrics = await invoke<SystemMetrics>("get_system_metrics");
+        setSystemMetrics((prev) => ({
+          ...metrics,
+          process_count: prev?.process_count ?? runningProcesses.length,
+          listening_process_count: prev?.listening_process_count ?? 0,
+        }));
+      } catch (e) {
+        error = String(e);
+      }
+
+      const processRowsResult = await processRowsPromise;
+      if (processRowsResult.error) {
+        error = error ? `${error}; ${processRowsResult.error}` : processRowsResult.error;
+      } else if (processRowsResult.rows) {
+        const processRows = processRowsResult.rows;
+        const listeningCount = processRows.filter((p) => p.listener_addresses.length > 0).length;
+        setSystemMetrics((prev) =>
+          prev
+            ? {
+                ...prev,
+                process_count: processRows.length,
+                listening_process_count: listeningCount,
+              }
+            : prev
+        );
+        setRunningProcesses(processRows);
+      }
+
+      {
+        if (!preserve) {
+          setScanError(error);
+          setLoading(false);
+        }
+      }
+    },
+    [runningProcesses.length]
+  );
+
   useEffect(() => {
     scan(false);
   }, [scan]);
 
   useEffect(() => {
+    if (viewMode === "processes" && runningProcesses.length === 0) {
+      scanRunningProcesses();
+    }
+    if (viewMode === "system" && !systemMetrics) {
+      scanSystem();
+    }
+  }, [runningProcesses.length, scanRunningProcesses, scanSystem, systemMetrics, viewMode]);
+
+  useEffect(() => {
     const sec = settings.autoRefreshSec;
     if (sec <= 0 || autoPaused || loading) return;
     const id = setInterval(() => {
-      scan(false, { preserveRowState: true });
+      if (viewMode === "listeners") scan(false, { preserveRowState: true });
+      else if (viewMode === "processes") scanRunningProcesses({ preserveRowState: true });
+      else scanSystem({ preserveRowState: true });
     }, sec * 1000);
     return () => clearInterval(id);
-  }, [settings.autoRefreshSec, autoPaused, loading, scan]);
+  }, [settings.autoRefreshSec, autoPaused, loading, scan, scanRunningProcesses, scanSystem, viewMode]);
 
   const isProtected = useCallback(
     (p: PortProcess) => settings.protectedRowKeys.includes(rowKey(p)),
@@ -356,8 +584,8 @@ function App() {
     });
   }, []);
 
-  const runKill = async (p: PortProcess) => {
-    const key = rowKey(p);
+  const runKill = async (p: KillTarget) => {
+    const key = killKey(p);
     setKillStates((prev) => new Map(prev).set(key, "killing"));
     setKillErrors((prev) => {
       const n = new Map(prev);
@@ -368,7 +596,12 @@ function App() {
       await invoke("kill_pid", { pid: p.pid });
       setKillStates((prev) => new Map(prev).set(key, "success"));
       setTimeout(() => {
-        setProcesses((prev) => prev.filter((x) => rowKey(x) !== key));
+        if ("port" in p) {
+          setProcesses((prev) => prev.filter((x) => rowKey(x) !== key));
+        } else {
+          setRunningProcesses((prev) => prev.filter((x) => x.pid !== p.pid));
+          setProcesses((prev) => prev.filter((x) => x.pid !== p.pid));
+        }
         setKillStates((prev) => {
           const n = new Map(prev);
           n.delete(key);
@@ -381,17 +614,31 @@ function App() {
     }
   };
 
-  const requestKill = (p: PortProcess) => {
+  const requestKill = (p: KillTarget) => {
     if (settings.skipKillConfirm) void runKill(p);
     else setPendingKill(p);
   };
 
   const stats = useMemo(() => {
-    const portCount = processes.length;
-    const pidCount = new Set(processes.map((p) => p.pid)).size;
-    const secs = processes
-      .map((p) => parseUptimeSecs(p.uptime))
-      .filter((s) => s > 0);
+    if (viewMode === "system") {
+      return {
+        portCount: systemMetrics?.process_count ?? runningProcesses.length,
+        pidCount: systemMetrics?.listening_process_count ?? 0,
+        avg: formatBytes(systemMetrics?.memory.available_bytes),
+        longest: formatBytes(systemMetrics?.disk.available_bytes),
+        newest: systemMetrics
+          ? `${percentUsed(systemMetrics.memory.used_bytes, systemMetrics.memory.total_bytes)}%`
+          : "—",
+      };
+    }
+
+    const source = viewMode === "listeners" ? processes : runningProcesses;
+    const portCount = viewMode === "listeners" ? processes.length : runningProcesses.length;
+    const pidCount =
+      viewMode === "listeners"
+        ? new Set(processes.map((p) => p.pid)).size
+        : runningProcesses.filter((p) => p.listener_addresses.length > 0).length;
+    const secs = source.map((p) => parseUptimeSecs(p.uptime)).filter((s) => s > 0);
     if (secs.length === 0)
       return { portCount, pidCount, avg: "—", longest: "—", newest: "—" };
     const avg = secs.reduce((a, b) => a + b, 0) / secs.length;
@@ -402,33 +649,67 @@ function App() {
       longest: secsToLabel(Math.max(...secs)),
       newest: secsToLabel(Math.min(...secs)),
     };
-  }, [processes]);
+  }, [processes, runningProcesses, systemMetrics, viewMode]);
 
   const exportCsv = () => {
     downloadBlob(
-      `port-scanner-${Date.now()}.csv`,
+      `port-scanner-${viewMode}-${Date.now()}.csv`,
       "text/csv;charset=utf-8",
-      toCsv(filteredProcesses)
+      viewMode === "listeners"
+        ? toCsv(filteredProcesses)
+        : processesToCsv(filteredRunningProcesses)
     );
     showToast("Exported CSV");
   };
 
   const exportJson = () => {
+    const body =
+      viewMode === "listeners"
+        ? filteredProcesses
+        : viewMode === "processes"
+          ? filteredRunningProcesses
+          : { metrics: systemMetrics, processes: filteredRunningProcesses };
     downloadBlob(
-      `port-scanner-${Date.now()}.json`,
+      `port-scanner-${viewMode}-${Date.now()}.json`,
       "application/json",
-      JSON.stringify(filteredProcesses, null, 2)
+      JSON.stringify(body, null, 2)
     );
     showToast("Exported JSON");
   };
 
   const copyRowLine = async (p: PortProcess) => {
     const url = buildOpenUrl(p.port, settings);
-    const line = [url, p.name, p.pid, p.port, formatBind(p.address)]
+    const line = [url, p.name, p.pid, p.port, formatBind(p.address), p.command ?? ""]
       .join("\t");
     const ok = await copyText(line);
     showToast(ok ? "Copied row" : "Copy failed");
   };
+
+  const copyProcessLine = async (p: RunningProcess) => {
+    const line = [
+      p.name,
+      p.pid,
+      p.uptime ?? "",
+      p.project ?? "",
+      p.listener_addresses.map(formatBind).join(" "),
+      p.command,
+    ].join("\t");
+    const ok = await copyText(line);
+    showToast(ok ? "Copied process" : "Copy failed");
+  };
+
+  const refreshCurrent = () => {
+    if (viewMode === "listeners") void scan(false);
+    else if (viewMode === "processes") void scanRunningProcesses();
+    else void scanSystem();
+  };
+
+  const hasRows =
+    viewMode === "listeners"
+      ? processes.length > 0
+      : viewMode === "processes"
+        ? runningProcesses.length > 0
+        : Boolean(systemMetrics) || runningProcesses.length > 0;
 
   return (
     <div className="app">
@@ -451,10 +732,17 @@ function App() {
               Kill process?
             </h2>
             <p className="modal-body">
-              <strong>{pendingKill.name}</strong> (PID {pendingKill.pid}) on port{" "}
-              <strong>{pendingKill.port}</strong>
+              <strong>{pendingKill.name}</strong> (PID {pendingKill.pid})
+              {"port" in pendingKill && (
+                <>
+                  {" on port "}
+                  <strong>{pendingKill.port}</strong>
+                </>
+              )}
               <br />
-              <span className="modal-sub">This sends SIGKILL — cannot be undone.</span>
+              <span className="modal-sub">
+                {compactCommand(pendingKill.command) || "This sends SIGKILL — cannot be undone."}
+              </span>
             </p>
             <div className="modal-actions">
               <button
@@ -561,7 +849,7 @@ function App() {
               </button>
             </span>
           </h1>
-          {isAdmin && <span className="admin-badge">admin</span>}
+          {isAdmin && viewMode === "listeners" && <span className="admin-badge">admin</span>}
         </div>
         <div className="header-actions">
           <button
@@ -575,18 +863,18 @@ function App() {
           <button
             type="button"
             className="btn btn-ghost"
-            onClick={() => scan(false)}
+            onClick={refreshCurrent}
             disabled={loading}
             title="Re-scan"
           >
-            {loading ? <span className="spinner" /> : "↻ Refresh"}
+            {loading ? "Refreshing…" : "↻ Refresh"}
           </button>
           <button
             type="button"
             className="btn btn-ghost btn-admin"
             onClick={() => scan(true)}
-            disabled={loading}
-            title="Prompts for admin password"
+            disabled={loading || viewMode !== "listeners"}
+            title={viewMode !== "listeners" ? "Admin scan applies to ports" : "Prompts for admin password"}
           >
             Scan as Admin
           </button>
@@ -596,7 +884,7 @@ function App() {
       <div className="stats-bar">
         <StatCard
           icon="◉"
-          label="Open Ports"
+          label={viewMode === "listeners" ? "Open Ports" : "Running"}
           value={stats.portCount}
           color="#00e87e"
           dim="rgba(0,232,126,0.1)"
@@ -604,7 +892,7 @@ function App() {
         <div className="stats-divider" />
         <StatCard
           icon="⬡"
-          label="Processes"
+          label={viewMode === "system" ? "Listening" : viewMode === "listeners" ? "Processes" : "Listening"}
           value={stats.pidCount}
           color="#3d94ff"
           dim="rgba(61,148,255,0.1)"
@@ -612,7 +900,7 @@ function App() {
         <div className="stats-divider" />
         <StatCard
           icon="∅"
-          label="Avg Open"
+          label={viewMode === "system" ? "Memory Free" : viewMode === "listeners" ? "Avg Open" : "Avg Age"}
           value={stats.avg}
           color="#b8cfe8"
           dim="rgba(184,207,232,0.06)"
@@ -620,7 +908,7 @@ function App() {
         <div className="stats-divider" />
         <StatCard
           icon="↑"
-          label="Longest"
+          label={viewMode === "system" ? "Disk Free" : "Longest"}
           value={stats.longest}
           color="#ff3d5a"
           dim="rgba(255,61,90,0.1)"
@@ -628,7 +916,7 @@ function App() {
         <div className="stats-divider" />
         <StatCard
           icon="↓"
-          label="Newest"
+          label={viewMode === "system" ? "Mem Used" : "Newest"}
           value={stats.newest}
           color="#00e87e"
           dim="rgba(0,232,126,0.1)"
@@ -642,26 +930,67 @@ function App() {
           </div>
         )}
 
-        {loading ? (
+        {loading && !hasRows ? (
           <div className="empty-state">
-            <div className="spinner large" />
-            <p>Scanning for active listeners…</p>
+            <p className="empty-icon">◌</p>
+            <p>{viewMode === "listeners" ? "Scanning for active listeners…" : viewMode === "processes" ? "Scanning running processes…" : "Scanning system resources…"}</p>
           </div>
-        ) : processes.length === 0 ? (
+        ) : !hasRows ? (
           <div className="empty-state">
             <p className="empty-icon">◎</p>
-            <p>No processes found listening on ports.</p>
+            <p>{viewMode === "listeners" ? "No processes found listening on ports." : viewMode === "processes" ? "No running processes found." : "No system metrics found."}</p>
+            <div className="empty-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setViewMode(viewMode === "listeners" ? "processes" : "listeners")}
+              >
+                Show {viewMode === "listeners" ? "Running Processes" : "Ports"}
+              </button>
+              {viewMode !== "system" && (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => setViewMode("system")}
+                >
+                  Show System
+                </button>
+              )}
+            </div>
           </div>
         ) : (
           <>
             <div className="toolbar">
+              <div className="view-toggle" aria-label="View mode">
+                <button
+                  type="button"
+                  className={`view-toggle-btn${viewMode === "listeners" ? " view-toggle-active" : ""}`}
+                  onClick={() => setViewMode("listeners")}
+                >
+                  Ports
+                </button>
+                <button
+                  type="button"
+                  className={`view-toggle-btn${viewMode === "processes" ? " view-toggle-active" : ""}`}
+                  onClick={() => setViewMode("processes")}
+                >
+                  Processes
+                </button>
+                <button
+                  type="button"
+                  className={`view-toggle-btn${viewMode === "system" ? " view-toggle-active" : ""}`}
+                  onClick={() => setViewMode("system")}
+                >
+                  System
+                </button>
+              </div>
               <input
                 type="search"
                 className="toolbar-filter"
-                placeholder="Filter by name, PID, port, bind…"
+                placeholder={viewMode === "listeners" ? "Filter by name, PID, port, bind…" : "Filter by app, PID, command, folder…"}
                 value={filterText}
                 onChange={(e) => setFilterText(e.target.value)}
-                aria-label="Filter listeners"
+                aria-label={viewMode === "listeners" ? "Filter listeners" : "Filter processes"}
               />
               <div className="toolbar-group">
                 <label className="toolbar-label">
@@ -708,19 +1037,24 @@ function App() {
               </div>
             </div>
 
-            <div className="chart-section">
-              <button
-                type="button"
-                className="chart-toggle"
-                onClick={() => setChartOpen((v) => !v)}
-              >
-                <span>UPTIME DISTRIBUTION</span>
-                <span className="chart-chevron">{chartOpen ? "▲" : "▼"}</span>
-              </button>
-              {chartOpen && <UptimeChart processes={processes} />}
-            </div>
+            {viewMode === "listeners" && (
+              <div className="chart-section">
+                <button
+                  type="button"
+                  className="chart-toggle"
+                  onClick={() => setChartOpen((v) => !v)}
+                >
+                  <span>UPTIME DISTRIBUTION</span>
+                  <span className="chart-chevron">{chartOpen ? "▲" : "▼"}</span>
+                </button>
+                {chartOpen && <UptimeChart processes={processes} />}
+              </div>
+            )}
+
+            {viewMode === "system" && <SystemPanel metrics={systemMetrics} />}
 
             <div className="table-wrap">
+              {viewMode === "listeners" ? (
               <table className="process-table">
                 <thead>
                   <tr>
@@ -868,6 +1202,11 @@ function App() {
                                 {p.project}
                               </span>
                             )}
+                            {p.command && (
+                              <span className="col-name-command" title={p.command}>
+                                {compactCommand(p.command)}
+                              </span>
+                            )}
                           </td>
                           <td className="col-pid">{p.pid}</td>
                           <td className="col-port">{p.port}</td>
@@ -931,23 +1270,118 @@ function App() {
                   )}
                 </tbody>
               </table>
+              ) : (
+              <table className="process-table">
+                <thead>
+                  <tr>
+                    <th>Process</th>
+                    <th>PID</th>
+                    <th>Command</th>
+                    <th>Open</th>
+                    <th>Listeners</th>
+                    <th className="th-actions" aria-label="Actions" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRunningProcesses.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="td-empty-filter">
+                        No processes match your filter.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredRunningProcesses.map((p) => {
+                      const key = processKey(p);
+                      const ks = killStates.get(key);
+                      const errMsg = killErrors.get(key);
+                      return (
+                        <tr
+                          key={key}
+                          className={
+                            ks === "success"
+                              ? "row row-success"
+                              : ks === "error"
+                                ? "row row-error"
+                                : "row"
+                          }
+                        >
+                          <td className="col-name">
+                            <span className="col-name-text">{p.name}</span>
+                            {p.project && (
+                              <span className="col-name-project" title={p.cwd}>
+                                {p.project}
+                              </span>
+                            )}
+                          </td>
+                          <td className="col-pid">{p.pid}</td>
+                          <td className="col-command" title={p.command}>
+                            {compactCommand(p.command)}
+                          </td>
+                          <td className="col-open">{p.uptime ?? "—"}</td>
+                          <td className="col-listeners">
+                            {p.listener_addresses.length > 0
+                              ? p.listener_addresses.map(formatBind).join(", ")
+                              : "—"}
+                          </td>
+                          <td className="col-action">
+                            {errMsg && (
+                              <span className="kill-error-tip" title={errMsg}>
+                                ⚠
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              className="btn btn-copy"
+                              title="Copy process row (tab-separated)"
+                              onClick={() => void copyProcessLine(p)}
+                            >
+                              ⧉
+                            </button>
+                            <button
+                              type="button"
+                              className={`btn btn-kill${ks === "success" ? " btn-kill-done" : ks === "error" ? " btn-kill-failed" : ""}`}
+                              onClick={() => requestKill(p)}
+                              disabled={ks === "killing" || ks === "success"}
+                            >
+                              {ks === "killing"
+                                ? "…"
+                                : ks === "success"
+                                  ? "✓"
+                                  : ks === "error"
+                                    ? "Retry"
+                                    : "Kill"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+              )}
             </div>
           </>
         )}
       </div>
 
       <footer className="footer">
-        {!loading && (
-          <span>
-            {q
-              ? `Showing ${filteredProcesses.length} of ${processes.length} listeners`
-              : `${processes.length} ${processes.length === 1 ? "listener" : "listeners"}`}
-            {isAdmin ? " · admin scan" : ""}
-            {settings.autoRefreshSec > 0 && !autoPaused
-              ? ` · auto ${settings.autoRefreshSec}s`
-              : ""}
-          </span>
-        )}
+        <span>
+          {loading ? "Scanning…" : (
+            <>
+              {viewMode === "listeners"
+                ? q
+                  ? `Showing ${filteredProcesses.length} of ${processes.length} listeners`
+                  : `${processes.length} ${processes.length === 1 ? "listener" : "listeners"}`
+                : q
+                  ? `Showing ${filteredRunningProcesses.length} of ${runningProcesses.length} processes`
+                  : `${runningProcesses.length} ${runningProcesses.length === 1 ? "process" : "processes"}`}
+              {isAdmin && viewMode === "listeners" ? " · admin scan" : ""}
+              {settings.autoRefreshSec > 0 && !autoPaused
+                ? ` · auto ${settings.autoRefreshSec}s`
+                : ""}
+            </>
+          )}
+        </span>
       </footer>
     </div>
   );

@@ -334,6 +334,7 @@
   font-size: 12px;
 }
 .empty-icon { font-size: 28px; color: var(--green); opacity: 0.6; }
+.empty-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
 
 /* ── Toast ─────────────────────────────────────── */
 .toast {
@@ -488,6 +489,31 @@
   gap: 10px;
 }
 
+.view-toggle {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border2);
+  border-radius: 5px;
+  background: var(--surface2);
+}
+
+.view-toggle-btn {
+  border: none;
+  border-radius: 3px;
+  padding: 5px 9px;
+  background: transparent;
+  color: var(--muted2);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.view-toggle-btn:hover { color: var(--text); }
+.view-toggle-active { background: rgba(61,148,255,0.14); color: var(--blue); }
+
 .toolbar-export {
   margin-left: auto;
 }
@@ -521,6 +547,71 @@
   padding: 4px 10px !important;
   font-size: 10px !important;
 }
+
+/* ── System metrics ──────────────────────────────── */
+.system-panel {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0,0,0,0.12);
+  flex-shrink: 0;
+}
+
+.system-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.02);
+}
+
+.system-card-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.system-card strong {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.system-card span:not(.system-card-label) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.system-meter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.05);
+}
+
+.system-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+  box-shadow: 0 0 8px rgba(61,148,255,0.35);
+}
+
+.system-meter-disk span { background: var(--red); box-shadow: 0 0 8px rgba(255,61,90,0.3); }
+.system-meter-process span { background: var(--green); box-shadow: 0 0 8px rgba(0,232,126,0.3); }
 
 /* ── Chart section ───────────────────────────────── */
 .chart-section {
@@ -719,6 +810,7 @@
 }
 
 .process-table th:last-child:not(.col-sort) { text-align: right; }
+.process-table th:not(.col-sort):not(.th-prot) { padding: 7px 14px; }
 
 .process-table td {
   padding: 9px 14px;
@@ -780,6 +872,8 @@
 .col-pid    { width: 8%;  color: var(--muted); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .col-port   { width: 8%;  color: var(--blue); font-weight: 700; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .col-bind   { width: 22%; color: var(--muted2); font-size: 11px; font-family: var(--font-mono); }
+.col-command { width: 34%; color: var(--muted2); font-size: 11px; font-family: var(--font-mono); }
+.col-listeners { width: 16%; color: var(--blue); font-size: 11px; font-family: var(--font-mono); }
 .col-open   { width: 9%; color: var(--muted2); font-size: 11px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .col-action { width: 19%; }
 
@@ -815,6 +909,19 @@
   cursor: default;
 }
 
+.col-name-command {
+  display: block;
+  max-width: 100%;
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  opacity: 0.9;
+}
+
 .kill-error-tip { margin-right: 6px; cursor: help; color: var(--yellow); font-size: 12px; }
 
 /* ── Footer ──────────────────────────────────────── */
@@ -830,22 +937,4 @@
   font-size: 10px;
   letter-spacing: 0.06em;
   flex-shrink: 0;
-}
-
-/* ── Spinner ─────────────────────────────────────── */
-@keyframes spin { to { transform: rotate(360deg); } }
-
-.spinner {
-  display: inline-block;
-  width: 12px; height: 12px;
-  border: 2px solid rgba(255,255,255,0.1);
-  border-top-color: var(--text);
-  border-radius: 50%;
-  animation: spin 0.7s linear infinite;
-  vertical-align: middle;
-}
-.spinner.large {
-  width: 24px; height: 24px;
-  border-width: 2px;
-  border-top-color: var(--blue);
 }
