@@ -25,5 +25,18 @@ dist-ssr
 
 # Large/generated local artifacts
 *.dmg
+
+# GG Coder / local agent runtime artifacts
+.gg/agents/
+.gg/skills/
 .gg/screenshots/
 .gg/uploads/
+.gg/generated/
+.gg/tasks/
+.gg/tmp/
+.gg/cache/
+
+# Legion / wiki generated local state
+.legion/
+legion/
+library/knowledge-base/wiki/
